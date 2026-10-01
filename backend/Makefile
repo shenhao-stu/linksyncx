@@ -16,6 +16,7 @@ test:
 	golangci-lint run ./...
 
 test-unit:
+	python3 ./scripts/test_crs_go.py
 	$(CRS_GO_RUN) test -tags=unit ./...
 
 test-integration:

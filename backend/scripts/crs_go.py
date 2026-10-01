@@ -21,13 +21,24 @@ def verify_file(path, expected):
         raise ValueError(f"SHA256 mismatch for {path}: expected {expected}, got {actual}")
 
 
-def overlay_files(go, temporary):
-    manifest = json.loads((PATCH_DIR / "manifest.json").read_text())
+def download_module(go, manifest):
     module = json.loads(subprocess.check_output(
         [go, "list", "-m", "-json", manifest["module"]], cwd=BACKEND, text=True))
     if module.get("Version") != manifest["version"] or module.get("Replace"):
         raise ValueError("mihomo version/replacement differs from the reviewed overlay")
-    original = Path(module["Dir"]) / "log" / "log.go"
+    downloaded = json.loads(subprocess.check_output(
+        [go, "mod", "download", "-json", manifest["module"] + "@" + manifest["version"]],
+        cwd=BACKEND, text=True))
+    if (downloaded.get("Error") or downloaded.get("Path") != manifest["module"] or
+            downloaded.get("Version") != manifest["version"] or not downloaded.get("Dir")):
+        raise ValueError("downloaded module differs from the reviewed overlay")
+    return Path(downloaded["Dir"])
+
+
+def overlay_files(go, temporary):
+    manifest = json.loads((PATCH_DIR / "manifest.json").read_text())
+    module = download_module(go, manifest)
+    original = module / "log" / "log.go"
     replacement = PATCH_DIR / manifest["replacement_file"]
     verify_file(original, manifest["original_sha256"])
     verify_file(replacement, manifest["replacement_sha256"])
@@ -35,7 +46,7 @@ def overlay_files(go, temporary):
     # Go forbids overlays beneath GOMODCACHE. Isolate this one module instead
     # of modifying the shared cache or vendoring the dependency graph.
     isolated = temporary / "mihomo"
-    shutil.copytree(module["Dir"], isolated, copy_function=shutil.copyfile)
+    shutil.copytree(module, isolated, copy_function=shutil.copyfile)
     for directory, _, _ in os.walk(isolated):
         Path(directory).chmod(0o700)
     modfile = temporary / "crs.mod"
