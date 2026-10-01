@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -191,12 +190,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// === DEBUG: 打印客户端原始请求（headers + body 摘要）===
 	if c != nil {
-		s.debugLogGatewaySnapshot("CLIENT_ORIGINAL", c.Request.Header, body, map[string]string{
-			"account":      fmt.Sprintf("%d(%s)", account.ID, account.Name),
-			"account_type": string(account.Type),
-			"model":        reqModel,
-			"stream":       strconv.FormatBool(reqStream),
-		})
+		s.debugLogGatewaySnapshot("CLIENT_ORIGINAL", c.Request.Header, body)
 	}
 
 	// Claude Code 客户端判定：UA 匹配 claude-cli/* 且携带 metadata.user_id。

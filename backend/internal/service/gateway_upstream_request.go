@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -224,14 +223,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	account.ApplyHeaderOverrides(req.Header)
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
-	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body, map[string]string{
-		"url":                 req.URL.String(),
-		"token_type":          tokenType,
-		"mimic_claude_code":   strconv.FormatBool(mimicClaudeCode),
-		"fingerprint_applied": strconv.FormatBool(fingerprint != nil),
-		"enable_fp":           strconv.FormatBool(enableFP),
-		"enable_mpt":          strconv.FormatBool(enableMPT),
-	})
+	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body)
 
 	// Always capture a compact fingerprint line for later error diagnostics.
 	// We only print it when needed (or when the explicit debug flag is enabled).
@@ -360,12 +352,7 @@ func (s *GatewayService) buildUpstreamRequestAnthropicVertex(
 		setHeaderRaw(req.Header, "anthropic-beta", finalBeta)
 	}
 
-	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD_VERTEX_ANTHROPIC", req.Header, vertexBody, map[string]string{
-		"url":        req.URL.String(),
-		"token_type": "service_account",
-		"model":      modelID,
-		"stream":     strconv.FormatBool(reqStream),
-	})
+	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD_VERTEX_ANTHROPIC", req.Header, vertexBody)
 
 	return req, nil
 }

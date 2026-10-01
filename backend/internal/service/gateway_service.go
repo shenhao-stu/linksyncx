@@ -273,119 +273,19 @@ func shortSessionHash(sessionHash string) string {
 	return sessionHash[:8]
 }
 
-func redactAuthHeaderValue(v string) string {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return ""
-	}
-	// Keep scheme for debugging, redact secret.
-	if strings.HasPrefix(strings.ToLower(v), "bearer ") {
-		return "Bearer [redacted]"
-	}
-	return "[redacted]"
-}
-
-func safeHeaderValueForLog(key string, v string) string {
-	key = strings.ToLower(strings.TrimSpace(key))
-	switch key {
-	case "authorization", "x-api-key":
-		return redactAuthHeaderValue(v)
-	default:
-		return strings.TrimSpace(v)
-	}
-}
-
-func extractSystemPreviewFromBody(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	sys := gjson.GetBytes(body, "system")
-	if !sys.Exists() {
-		return ""
-	}
-
-	switch {
-	case sys.IsArray():
-		for _, item := range sys.Array() {
-			if !item.IsObject() {
-				continue
-			}
-			if strings.EqualFold(item.Get("type").String(), "text") {
-				if t := item.Get("text").String(); strings.TrimSpace(t) != "" {
-					return t
-				}
-			}
-		}
-		return ""
-	case sys.Type == gjson.String:
-		return sys.String()
-	default:
-		return ""
-	}
-}
-
 func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) string {
 	if req == nil {
 		return ""
 	}
-
-	// Only log a minimal fingerprint to avoid leaking user content.
-	interesting := []string{
-		"user-agent",
-		"x-app",
-		"anthropic-dangerous-direct-browser-access",
-		"anthropic-version",
-		"anthropic-beta",
-		"x-stainless-lang",
-		"x-stainless-package-version",
-		"x-stainless-os",
-		"x-stainless-arch",
-		"x-stainless-runtime",
-		"x-stainless-runtime-version",
-		"x-stainless-retry-count",
-		"x-stainless-timeout",
-		"authorization",
-		"x-api-key",
-		"content-type",
-		"accept",
-		"x-stainless-helper-method",
-	}
-
-	h := make([]string, 0, len(interesting))
-	for _, k := range interesting {
-		if v := req.Header.Get(k); v != "" {
-			h = append(h, fmt.Sprintf("%s=%q", k, safeHeaderValueForLog(k, v)))
-		}
-	}
-
-	metaUserID := strings.TrimSpace(gjson.GetBytes(body, "metadata.user_id").String())
-	sysPreview := strings.TrimSpace(extractSystemPreviewFromBody(body))
-
-	// Truncate preview to keep logs sane.
-	if len(sysPreview) > 300 {
-		sysPreview = sysPreview[:300] + "..."
-	}
-	sysPreview = strings.ReplaceAll(sysPreview, "\n", "\\n")
-	sysPreview = strings.ReplaceAll(sysPreview, "\r", "\\r")
-
-	aid := int64(0)
-	aname := ""
+	accountID := int64(0)
 	if account != nil {
-		aid = account.ID
-		aname = account.Name
+		accountID = account.ID
 	}
-
-	return fmt.Sprintf(
-		"url=%s account=%d(%s) tokenType=%s mimic=%t meta.user_id=%q system.preview=%q headers={%s}",
-		req.URL.String(),
-		aid,
-		aname,
-		tokenType,
-		mimicClaudeCode,
-		metaUserID,
-		sysPreview,
-		strings.Join(h, " "),
-	)
+	if tokenType != "oauth" && tokenType != "apikey" {
+		tokenType = "other"
+	}
+	return fmt.Sprintf("account_id=%d token_type=%s mimic=%t request=%s",
+		accountID, tokenType, mimicClaudeCode, gatewayDiagnosticJSON(req.Header, body))
 }
 
 func logClaudeMimicDebug(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) {
@@ -1647,75 +1547,33 @@ func (s *GatewayService) initDebugGatewayBodyFile(path string) {
 
 	// 确保父目录存在
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil { //nolint:gosec // G703: 同上
+		if err := os.MkdirAll(dir, 0700); err != nil { //nolint:gosec // G703: 同上
 			slog.Error("failed to create gateway debug log directory", "dir", dir, "error", err)
 			return
 		}
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644) //nolint:gosec // G703: 同上
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600) //nolint:gosec // G703: 同上
 	if err != nil {
 		slog.Error("failed to open gateway debug log file", "path", path, "error", err)
+		return
+	}
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		slog.Error("failed to restrict gateway debug log permissions", "error", err)
 		return
 	}
 	s.debugGatewayBodyFile.Store(f)
 	slog.Info("gateway debug logging enabled", "path", path)
 }
 
-// debugLogGatewaySnapshot 将网关请求的完整快照（headers + body）写入独立的调试日志文件，
-// 用于对比客户端原始请求和上游转发请求。
-//
-// 启用方式（环境变量）：
-//
-//	SUB2API_DEBUG_GATEWAY_BODY=1                          # 写入 gateway_debug.log
-//	SUB2API_DEBUG_GATEWAY_BODY=/tmp/gateway_debug.log     # 写入指定路径
-//
-// tag: "CLIENT_ORIGINAL" 或 "UPSTREAM_FORWARD"
-func (s *GatewayService) debugLogGatewaySnapshot(tag string, headers http.Header, body []byte, extra map[string]string) {
+// debugLogGatewaySnapshot writes a structural summary to the explicitly enabled
+// SUB2API_DEBUG_GATEWAY_BODY file. Raw payloads, URLs and caller values stay out.
+func (s *GatewayService) debugLogGatewaySnapshot(tag string, headers http.Header, body []byte) {
 	f := s.debugGatewayBodyFile.Load()
 	if f == nil {
 		return
 	}
-
-	var buf strings.Builder
-	ts := time.Now().Format("2006-01-02 15:04:05.000")
-	fmt.Fprintf(&buf, "\n========== [%s] %s ==========\n", ts, tag)
-
-	// 1. context
-	if len(extra) > 0 {
-		fmt.Fprint(&buf, "--- context ---\n")
-		extraKeys := make([]string, 0, len(extra))
-		for k := range extra {
-			extraKeys = append(extraKeys, k)
-		}
-		sort.Strings(extraKeys)
-		for _, k := range extraKeys {
-			fmt.Fprintf(&buf, "  %s: %s\n", k, extra[k])
-		}
-	}
-
-	// 2. headers（按真实 Claude CLI wire 顺序排列，便于与抓包对比；auth 脱敏）
-	fmt.Fprint(&buf, "--- headers ---\n")
-	for _, k := range sortHeadersByWireOrder(headers) {
-		for _, v := range headers[k] {
-			fmt.Fprintf(&buf, "  %s: %s\n", k, safeHeaderValueForLog(k, v))
-		}
-	}
-
-	// 3. body（完整输出，格式化 JSON 便于 diff）
-	fmt.Fprint(&buf, "--- body ---\n")
-	if len(body) == 0 {
-		fmt.Fprint(&buf, "  (empty)\n")
-	} else {
-		var pretty bytes.Buffer
-		if json.Indent(&pretty, body, "  ", "  ") == nil {
-			fmt.Fprintf(&buf, "  %s\n", pretty.Bytes())
-		} else {
-			// JSON 格式化失败时原样输出
-			fmt.Fprintf(&buf, "  %s\n", body)
-		}
-	}
-
-	// 写入文件（调试用，并发写入可能交错但不影响可读性）
-	_, _ = f.WriteString(buf.String())
+	_, _ = fmt.Fprintf(f, "%s %s %s\n", time.Now().UTC().Format(time.RFC3339Nano),
+		gatewayDiagnosticTag(tag), gatewayDiagnosticJSON(headers, body))
 }
