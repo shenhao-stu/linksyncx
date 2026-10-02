@@ -164,3 +164,16 @@ func TestParseCLIVersionRejection(t *testing.T) {
 	_, ok = ParseCLIVersionRejection(http.StatusForbidden, body)
 	require.False(t, ok)
 }
+
+func TestConfiguredCLIVersionReachesProxyAndBillingHeaders(t *testing.T) {
+	SetCLIVersionResolver(func() string { return "1.1.0" })
+	t.Cleanup(func() { SetCLIVersionResolver(nil) })
+	req, err := http.NewRequest(http.MethodPost, "https://cli-chat-proxy.grok.com/v1/responses", nil)
+	require.NoError(t, err)
+	ApplyCLIProxyHeaders(req)
+	require.Equal(t, "1.1.0", req.Header.Get("X-Grok-Client-Version"))
+	require.Equal(t, CLIUserAgent("1.1.0"), req.UserAgent())
+	ApplyCLIBillingHeaders(req, "")
+	require.Equal(t, "1.1.0", req.Header.Get("X-Grok-Client-Version"))
+	require.Equal(t, CLIUserAgent("1.1.0"), req.UserAgent())
+}

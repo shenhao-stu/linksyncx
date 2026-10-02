@@ -498,6 +498,11 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 	}
 	auditReq := settingsAuditRequest(req)
 	omitted := omittedSettingKeys(sentFields)
+	for _, key := range []string{service.SettingKeyClaudeCodeClientVersion, service.SettingKeyClaudeCodeVersionAutoSyncEnabled} {
+		if _, present := sentFields[key]; !present {
+			omitted[key] = struct{}{}
+		}
+	}
 
 	previousSettings, err := h.settingService.GetAllSettings(c.Request.Context())
 	if err != nil {

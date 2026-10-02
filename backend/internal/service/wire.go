@@ -417,14 +417,12 @@ func ProvideOpenAICodexVersionSyncService(
 	return svc
 }
 
-// ProvideClaudeCodeVersionSyncService creates and starts ClaudeCodeVersionSyncService.
-// 出站 Claude Code 身份的版本号靠它跟随官方发布，无需为了跟版本而发新版本；面板可关闭。
-func ProvideClaudeCodeVersionSyncService(
-	settingRepo SettingRepository,
+// ProvideClientVersionSyncService creates and starts ClientVersionSyncService.
+// All clients require an explicit opt-in before any metadata request.
+func ProvideClientVersionSyncService(
 	settingService *SettingService,
-	githubClient GitHubReleaseClient,
-) *ClaudeCodeVersionSyncService {
-	svc := NewClaudeCodeVersionSyncService(settingRepo, settingService, githubClient, claudeCodeVersionSyncInterval)
+) *ClientVersionSyncService {
+	svc := NewClientVersionSyncService(settingService, clientVersionSyncInterval)
 	svc.Start()
 	return svc
 }
@@ -812,11 +810,13 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
 	})
-	// Claude CLI 伪装版本号同理：运行期解析（面板手动值 → 后台同步值 → 内置基线），
+	// Claude CLI、SDK 和 Grok CLI 共享版本策略与缓存；关闭同步时使用手填值。
 	// 解析器内部自带 60s TTL 缓存，热路径不触库。
 	claude.SetCLIVersionResolver(func() string {
 		return svc.GetClaudeCodeClientVersion(context.Background())
 	})
+	claude.SetSDKVersionResolver(func() string { return svc.clientVersion(context.Background(), "claude_sdk") })
+	xai.SetCLIVersionResolver(func() string { return svc.clientVersion(context.Background(), "grok_cli") })
 	return svc
 }
 
@@ -948,7 +948,7 @@ var ProviderSet = wire.NewSet(
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,
 	ProvideOpenAICodexVersionSyncService,
-	ProvideClaudeCodeVersionSyncService,
+	ProvideClientVersionSyncService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
 	ProvideTimingWheelService,

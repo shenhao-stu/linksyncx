@@ -123,7 +123,7 @@ func defaultFingerprint() Fingerprint {
 	return Fingerprint{
 		UserAgent:               claude.DefaultUserAgent(),
 		StainlessLang:           "js",
-		StainlessPackageVersion: claude.SDKTSVersion,
+		StainlessPackageVersion: claude.EffectiveSDKVersion(),
 		StainlessOS:             "Linux",
 		StainlessArch:           "arm64",
 		StainlessRuntime:        "node",
@@ -137,6 +137,7 @@ type Fingerprint struct {
 	UserAgent               string
 	StainlessLang           string
 	StainlessPackageVersion string
+	SDKVersionFromDefault   bool `json:",omitempty"`
 	StainlessOS             string
 	StainlessArch           string
 	StainlessRuntime        string
@@ -278,6 +279,7 @@ func (s *IdentityService) createFingerprintFromHeaders(headers http.Header) *Fin
 	df := defaultFingerprint()
 	fp.StainlessLang = getHeaderOrDefault(headers, "X-Stainless-Lang", df.StainlessLang)
 	fp.StainlessPackageVersion = getHeaderOrDefault(headers, "X-Stainless-Package-Version", df.StainlessPackageVersion)
+	fp.SDKVersionFromDefault = headers.Get("X-Stainless-Package-Version") == ""
 	fp.StainlessOS = getHeaderOrDefault(headers, "X-Stainless-OS", df.StainlessOS)
 	fp.StainlessArch = getHeaderOrDefault(headers, "X-Stainless-Arch", df.StainlessArch)
 	fp.StainlessRuntime = getHeaderOrDefault(headers, "X-Stainless-Runtime", df.StainlessRuntime)
@@ -298,6 +300,9 @@ func mergeHeadersIntoFingerprint(fp *Fingerprint, headers http.Header) {
 	// X-Stainless-* 头：仅在请求中实际携带时才更新，否则保留缓存值
 	mergeHeader(headers, "X-Stainless-Lang", &fp.StainlessLang)
 	mergeHeader(headers, "X-Stainless-Package-Version", &fp.StainlessPackageVersion)
+	if headers.Get("X-Stainless-Package-Version") != "" {
+		fp.SDKVersionFromDefault = false
+	}
 	mergeHeader(headers, "X-Stainless-OS", &fp.StainlessOS)
 	mergeHeader(headers, "X-Stainless-Arch", &fp.StainlessArch)
 	mergeHeader(headers, "X-Stainless-Runtime", &fp.StainlessRuntime)
@@ -335,7 +340,9 @@ func (s *IdentityService) ApplyFingerprint(req *http.Request, fp *Fingerprint) {
 	if fp.StainlessLang != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Lang", fp.StainlessLang)
 	}
-	if fp.StainlessPackageVersion != "" {
+	if fp.SDKVersionFromDefault {
+		setHeaderRaw(req.Header, "X-Stainless-Package-Version", claude.EffectiveSDKVersion())
+	} else if fp.StainlessPackageVersion != "" {
 		setHeaderRaw(req.Header, "X-Stainless-Package-Version", fp.StainlessPackageVersion)
 	}
 	if fp.StainlessOS != "" {

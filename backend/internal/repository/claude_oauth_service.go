@@ -285,7 +285,7 @@ func (s *claudeOAuthService) RefreshToken(ctx context.Context, refreshToken, pro
 		SetHeader("Content-Type", "application/json").
 		SetHeader("Accept", "*/*").
 		SetHeaderNonCanonical("anthropic-beta", "oauth-2025-04-20").
-		SetHeader("User-Agent", claude.OAuthHelperUserAgent).
+		SetHeader("User-Agent", claude.EffectiveOAuthHelperUserAgent()).
 		SetBody(bodyBytes).
 		SetSuccessResult(&tokenResp).
 		Post(s.tokenURL)

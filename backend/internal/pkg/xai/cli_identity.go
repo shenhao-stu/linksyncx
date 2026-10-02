@@ -5,6 +5,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/mod/semver"
 )
@@ -98,7 +99,29 @@ func CLIRequestKindFor(method, path string) CLIRequestKind {
 // preferred client pin in billing.go). CLIStableVersion is only the minimum
 // accepted by IsSupportedCLIVersion, not the default identity we advertise, so
 // an override may sit below the pin (rollback) or above it (a newer release).
+type cliVersionResolverFunc func() string
+
+var cliVersionResolver atomic.Pointer[cliVersionResolverFunc]
+
+func SetCLIVersionResolver(resolver func() string) {
+	if resolver == nil {
+		cliVersionResolver.Store(nil)
+		return
+	}
+	r := cliVersionResolverFunc(resolver)
+	cliVersionResolver.Store(&r)
+}
+
 func ResolveCLIVersion() string {
+	if r := cliVersionResolver.Load(); r != nil {
+		if v := (*r)(); IsSupportedCLIVersion(v) {
+			return v
+		}
+	}
+	return EnvironmentCLIVersion()
+}
+
+func EnvironmentCLIVersion() string {
 	version := strings.TrimSpace(os.Getenv(CLIVersionEnv))
 	if !IsSupportedCLIVersion(version) {
 		return CLIClientVersion

@@ -2,7 +2,40 @@ export default {
     settings: {
       title: 'System Settings',
       description: 'Manage registration, email verification, default values, and SMTP settings',
+      clientVersions: {
+  "title": "Client fingerprint versions",
+  "description": "Auto-sync is off by default. Enabling it checks official release metadata within one minute, then at most once per hour. Disabling it uses the saved custom version. Failed checks retain the last valid release.",
+  "scope": "These settings control gateway-generated version declarations; existing client-supplied SDK identity and native passthrough remain intact. SDK means {'@'}anthropic-ai/sdk (TypeScript), not the Agent SDK. Independent latest CLI and SDK releases do not prove they were bundled together.",
+  "loading": "Loading versions…",
+  "saved": "Version settings saved.",
+  "minimum": "Minimum supported version",
+  "builtin": "Built into this release",
+  "effective": "Currently effective",
+  "auto": "Sync official stable releases automatically",
+  "custom": "Custom version (used when auto-sync is off)",
+  "restore": "Use built-in version and turn off sync",
+  "synced": "Last valid official version",
+  "checked": "Last metadata check",
+  "never": "Not checked",
+  "syncError": "The last check failed or returned an older release. The saved version was retained.",
+  "reload": "Reload saved settings",
+  "save": "Save version settings",
+  "loadError": "Could not load version settings. Please retry.",
+  "saveError": "Could not save. Check that every version is supported and try again.",
+  "clients": {
+    "grok_cli": "Grok CLI",
+    "claude_cli": "Claude Code CLI",
+    "claude_sdk": "Claude TypeScript SDK"
+  },
+  "sources": {
+    "builtin": "built-in",
+    "environment": "environment",
+    "custom": "custom",
+    "official": "official sync"
+  }
+},
       tabs: {
+        versions: "Client Versions",
         general: 'General',
         agreement: 'Agreement',
         features: 'Feature Switches',

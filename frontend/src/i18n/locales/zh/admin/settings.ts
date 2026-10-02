@@ -2,7 +2,40 @@ export default {
     settings: {
       title: '系统设置',
       description: '管理注册、邮箱验证、默认值和 SMTP 设置',
+      clientVersions: {
+  "title": "客户端指纹版本",
+  "description": "自动同步默认关闭。开启后一分钟内检查官方版本元数据，此后每小时最多检查一次；关闭后使用已保存的自定义版本。检查失败会保留最后一个有效版本。",
+  "scope": "这些设置控制网关生成的版本声明，保留客户端提供的 SDK 身份和原生透传。SDK 指 {'@'}anthropic-ai/sdk（TypeScript），不是 Agent SDK；分别同步 CLI 和 SDK 最新版并不能证明二者来自同一客户端构建。",
+  "loading": "正在加载版本…",
+  "saved": "版本设置已保存。",
+  "minimum": "最低支持版本",
+  "builtin": "当前服务内置版本",
+  "effective": "当前生效版本",
+  "auto": "自动同步官方稳定版本",
+  "custom": "自定义版本（关闭自动同步时使用）",
+  "restore": "使用内置版本并关闭同步",
+  "synced": "最近有效的官方版本",
+  "checked": "最近元数据检查",
+  "never": "尚未检查",
+  "syncError": "最近检查失败或返回了更旧的版本，已保留原有版本。",
+  "reload": "重新读取已保存设置",
+  "save": "保存版本设置",
+  "loadError": "版本设置加载失败，请重试。",
+  "saveError": "保存失败，请检查各项版本是否受支持后重试。",
+  "clients": {
+    "grok_cli": "Grok CLI",
+    "claude_cli": "Claude Code CLI",
+    "claude_sdk": "Claude TypeScript SDK"
+  },
+  "sources": {
+    "builtin": "内置",
+    "environment": "环境变量",
+    "custom": "自定义",
+    "official": "官方同步"
+  }
+},
       tabs: {
+        versions: "版本管理",
         general: '通用设置',
         agreement: '登录条款',
         features: '功能开关',

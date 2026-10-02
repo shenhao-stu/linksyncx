@@ -38,6 +38,8 @@ func (s *SettingService) UpdateSettings(ctx context.Context, settings *SystemSet
 // UpdateSettingsOmitting persists system settings, leaving the keys in omitted
 // at their stored value.
 func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) error {
+	s.clientVersionMu.Lock()
+	defer s.clientVersionMu.Unlock()
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -60,6 +62,8 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaults(ctx context.Contex
 // auth-source defaults in a single write, leaving the keys in omitted at their
 // stored value.
 func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx context.Context, settings *SystemSettings, authDefaults *AuthSourceDefaultSettings, omitted OmittedSettingKeys) error {
+	s.clientVersionMu.Lock()
+	defer s.clientVersionMu.Unlock()
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err

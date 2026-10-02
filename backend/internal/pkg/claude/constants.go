@@ -236,7 +236,7 @@ func DefaultHeaders() map[string]string {
 		// 版本组参考：本机 claude.exe 2.1.280 抓包（sdk 0.112.1 / node v26.3.0）。
 		"User-Agent":                                DefaultUserAgent(),
 		"X-Stainless-Lang":                          "js",
-		"X-Stainless-Package-Version":               SDKTSVersion,
+		"X-Stainless-Package-Version":               EffectiveSDKVersion(),
 		"X-Stainless-OS":                            "Linux",
 		"X-Stainless-Arch":                          "arm64",
 		"X-Stainless-Runtime":                       "node",
