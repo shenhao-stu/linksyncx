@@ -55,7 +55,7 @@ func TestIdentityService_CacheFailurePropagatesWithoutTransientIdentity(t *testi
 
 func TestIdentityService_EmptyMaskedSessionFailsClosed(t *testing.T) {
 	svc := NewIdentityService(&failingIdentityCache{})
-	account := &Account{ID: 1, Extra: map[string]any{"session_id_masking_enabled": true}}
+	account := &Account{ID: 1, Platform: PlatformAnthropic, Type: AccountTypeOAuth, Extra: map[string]any{"session_id_masking_enabled": true}}
 	uid := FormatMetadataUserID(strings.Repeat("ab", 32), "acc", "11111111-2222-4333-8444-555555555555", "2.1.280")
 	body, err := sjson.SetBytes([]byte(`{"metadata":{}}`), "metadata.user_id", uid)
 	require.NoError(t, err)
