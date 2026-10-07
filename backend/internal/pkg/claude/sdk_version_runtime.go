@@ -30,7 +30,3 @@ func EffectiveSDKVersion() string {
 	}
 	return SDKTSVersion
 }
-
-func EffectiveOAuthHelperUserAgent() string {
-	return "anthropic-sdk-typescript/" + EffectiveSDKVersion() + " userOAuthProvider"
-}

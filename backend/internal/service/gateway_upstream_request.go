@@ -11,16 +11,24 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/google/uuid"
-	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
 )
 
 func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token, tokenType, modelID string, reqStream bool, mimicClaudeCode bool) (*http.Request, []byte, error) {
-	body = stripDeferredToolCacheControl(body)
+	req, wireBody, _, err := s.buildUpstreamRequestIndexed(ctx, c, account, body, nil, token, tokenType, modelID, reqStream, mimicClaudeCode)
+	return req, wireBody, err
+}
+
+// buildUpstreamRequestIndexed 与 buildUpstreamRequest 相同。bodyIndex 恰好描述 body 时，构建
+// 过程中的顶层查找与改写都走索引（大请求体每次查找都要整段跳过 messages），并返回最终 wire
+// body 的索引（无法维持时为 nil），供上游接受后同步请求体时免去重解析。
+func (s *GatewayService) buildUpstreamRequestIndexed(ctx context.Context, c *gin.Context, account *Account, body []byte, bodyIndex *jsonBodyIndex, token, tokenType, modelID string, reqStream bool, mimicClaudeCode bool) (*http.Request, []byte, *jsonBodyIndex, error) {
+	view := newJSONBodyView(body, bodyIndex)
+	stripDeferredToolCacheControlView(view)
 	if account.Platform == PlatformAnthropic && account.Type == AccountTypeServiceAccount {
-		req, err := s.buildUpstreamRequestAnthropicVertex(ctx, c, account, body, token, modelID, reqStream)
-		return req, body, err
+		req, err := s.buildUpstreamRequestAnthropicVertex(ctx, c, account, view.data, token, modelID, reqStream)
+		return req, view.data, view.idx, err
 	}
 
 	// 确定目标URL
@@ -30,18 +38,18 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		if baseURL != "" {
 			validatedURL, err := s.validateUpstreamBaseURL(baseURL)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			targetURL = validatedURL + "/v1/messages?beta=true"
 		}
 	} else if account.IsCustomBaseURLEnabled() {
 		customURL := account.GetCustomBaseURL()
 		if customURL == "" {
-			return nil, nil, fmt.Errorf("custom_base_url is enabled but not configured for account %d", account.ID)
+			return nil, nil, nil, fmt.Errorf("custom_base_url is enabled but not configured for account %d", account.ID)
 		}
 		validatedURL, err := s.validateUpstreamBaseURL(customURL)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		targetURL = s.buildCustomRelayURL(validatedURL, "/v1/messages", account)
 	}
@@ -63,25 +71,20 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 		// 1. 获取或创建指纹（包含随机生成的ClientID）
 		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
 		if err != nil {
-			return nil, nil, fmt.Errorf("account identity unavailable: %w", err)
-		} else {
-			if enableFP {
-				fingerprint = fp
-			}
+			return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
+		}
+		if enableFP {
+			fingerprint = fp
+		}
 
-			// 2. 重写metadata.user_id（需要指纹中的ClientID和账号的account_uuid）
-			// 如果启用了会话ID伪装，会在重写后替换 session 部分为固定值
-			// 当 metadata 透传开启时跳过重写
-			if !enableMPT {
-				accountUUID := account.GetExtraString("account_uuid")
-				if accountUUID != "" && fp.ClientID != "" {
-					newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent)
-					if err != nil {
-						return nil, nil, err
-					}
-					if len(newBody) > 0 {
-						body = newBody
-					}
+		// 2. 重写metadata.user_id（需要指纹中的ClientID和账号的account_uuid）
+		// 如果启用了会话ID伪装，会在重写后替换 session 部分为固定值
+		// 当 metadata 透传开启时跳过重写
+		if !enableMPT {
+			accountUUID := account.GetExtraString("account_uuid")
+			if accountUUID != "" && fp.ClientID != "" {
+				if err := s.identityService.rewriteUserIDWithMaskingView(ctx, view, account, accountUUID, fp.ClientID, fp.UserAgent); err != nil {
+					return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
 				}
 			}
 		}
@@ -94,7 +97,7 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// Mimicry may override the cached User-Agent later, even without a fingerprint.
 	if billingUA := effectiveBillingUserAgent(mimicUserAgent, tokenType, mimicClaudeCode, fingerprint); mimicClaudeCode && billingUA != "" {
-		body = syncBillingHeaderVersion(body, billingUA)
+		syncBillingHeaderVersionView(view, billingUA)
 	}
 
 	// === 计算最终 anthropic-beta header（先于 body sanitize）===
@@ -108,8 +111,8 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	//   4) 透传白名单 / fingerprint / mimic header / 写入 finalBeta
 	policyFilterSet := s.getBetaPolicyFilterSet(ctx, c, account, modelID)
 	effectiveDropSet := mergeDropSets(policyFilterSet)
-	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBeta(
-		tokenType, mimicClaudeCode, modelID, clientHeaders, body, effectiveDropSet,
+	finalBetaHeader, finalBetaShouldSet := s.computeFinalAnthropicBetaView(
+		tokenType, mimicClaudeCode, modelID, clientHeaders, view, effectiveDropSet,
 	)
 
 	// 账号覆写了 anthropic-beta 时，覆写值即最终上游值（由下方 ApplyHeaderOverrides 写入）：
@@ -119,18 +122,16 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	}
 
 	// 能力维度 body sanitize：与最终 anthropic-beta header 对称
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, finalBetaHeader); changed {
-		body = sanitized
-	}
+	sanitizeAnthropicBodyForBetaTokensView(view, finalBetaHeader)
 
 	// Ollama Cloud DeepSeek 出站 max_tokens clamp：判定与上方 targetURL 的
 	// base 取值同源（GetBaseURL），仅实际上游为 ollama.com 且映射后出站模型
 	// 为 DeepSeek 系时压到 cap，详见 helper 注释。
-	body = clampOllamaCloudAnthropicMessagesMaxTokens(account, account.GetBaseURL(), body)
+	view.replace(clampOllamaCloudAnthropicMessagesMaxTokens(account, account.GetBaseURL(), view.data))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(view.data))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// 设置认证头（2.1.280 抓包为 Canonical 形态）
@@ -204,17 +205,12 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 
 	// 同步 X-Claude-Code-Session-Id 头：真实 CLI 每个请求都带，且与
 	// metadata.user_id 的 session_id 一致。OAuth 路径无条件从 body 重建
-	// （mimic 路径下客户端可能根本没发该头）；极端缺省时随机 UUID 兜底。
+	// （mimic 路径下客户端可能根本没发该头）。body 里没有可用 session 时，
+	// 按 ResolveSessionIDWithoutMetadata 选账号作用域的会话，覆盖透传来的客户端
+	// 原始会话头（未映射的原值会和本对话 messages 请求的会话对不上）。
 	if tokenType == "oauth" {
-		synced := false
-		if uid := gjson.GetBytes(body, "metadata.user_id").String(); uid != "" {
-			if parsed := ParseMetadataUserID(uid); parsed != nil && parsed.SessionID != "" {
-				setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", parsed.SessionID)
-				synced = true
-			}
-		}
-		if !synced && mimicClaudeCode && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") == "" {
-			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", uuid.NewString())
+		if err := s.syncClaudeSessionHeader(ctx, account, req.Header, clientHeaders, view.get("metadata.user_id").String(), !enableFP && enableMPT && !mimicClaudeCode); err != nil {
+			return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
 		}
 	}
 
@@ -223,18 +219,18 @@ func (s *GatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Contex
 	account.ApplyHeaderOverrides(req.Header)
 
 	// === DEBUG: 打印上游转发请求（headers + body 摘要），与 CLIENT_ORIGINAL 对比 ===
-	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, body)
+	s.debugLogGatewaySnapshot("UPSTREAM_FORWARD", req.Header, view.data)
 
 	// Capture a structural summary for later error diagnostics.
 	// We only print it when needed (or when the explicit debug flag is enabled).
 	if c != nil && tokenType == "oauth" {
-		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLine(req, body, account, tokenType, mimicClaudeCode))
+		c.Set(claudeMimicDebugInfoKey, buildClaudeMimicDebugLineView(req, view, account, tokenType, mimicClaudeCode))
 	}
 	if s.debugClaudeMimicEnabled() {
-		logClaudeMimicDebug(req, body, account, tokenType, mimicClaudeCode)
+		logClaudeMimicDebug(req, view.data, account, tokenType, mimicClaudeCode)
 	}
 
-	return req, body, nil
+	return req, view.data, view.idx, nil
 }
 
 // vertexSupportedBetaTokens 是 Vertex AI 的 Anthropic 端点接受的 anthropic-beta
@@ -405,11 +401,15 @@ func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string) 
 }
 
 func requestNeedsBetaFeatures(body []byte) bool {
-	tools := gjson.GetBytes(body, "tools")
+	return requestNeedsBetaFeaturesView(newJSONBodyView(body, nil))
+}
+
+func requestNeedsBetaFeaturesView(view *jsonBodyView) bool {
+	tools := view.get("tools")
 	if tools.Exists() && tools.IsArray() && len(tools.Array()) > 0 {
 		return true
 	}
-	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	thinkingType := view.get("thinking.type").String()
 	if strings.EqualFold(thinkingType, "enabled") || strings.EqualFold(thinkingType, "adaptive") {
 		return true
 	}
@@ -417,7 +417,11 @@ func requestNeedsBetaFeatures(body []byte) bool {
 }
 
 func defaultAPIKeyBetaHeader(body []byte) string {
-	modelID := gjson.GetBytes(body, "model").String()
+	return defaultAPIKeyBetaHeaderView(newJSONBodyView(body, nil))
+}
+
+func defaultAPIKeyBetaHeaderView(view *jsonBodyView) string {
+	modelID := view.get("model").String()
 	if strings.Contains(strings.ToLower(modelID), "haiku") {
 		return claude.APIKeyHaikuBetaHeader
 	}
@@ -469,12 +473,12 @@ func mergeAnthropicBeta(required []string, incoming string) string {
 // bodyHasStructuredOutputFormat 检测结构化输出请求：output_config.format 为对象，或
 // 废弃的顶层 output_format 为对象（normalizeClaudeOAuthRequestBody 会把后者迁移为
 // 前者）。与真实客户端一致，null 等非对象值不算（sideQuery 以 Boolean(output_format) 判定）。
-func bodyHasStructuredOutputFormat(body []byte) bool {
-	if len(body) == 0 {
+func bodyHasStructuredOutputFormat(view *jsonBodyView) bool {
+	if len(view.data) == 0 {
 		return false
 	}
-	return gjson.GetBytes(body, "output_config.format").IsObject() ||
-		gjson.GetBytes(body, "output_format").IsObject()
+	return view.get("output_config.format").IsObject() ||
+		view.get("output_format").IsObject()
 }
 
 func mergeAnthropicBetaDropping(required []string, incoming string, drop map[string]struct{}) string {
@@ -496,7 +500,7 @@ func mergeAnthropicBetaDropping(required []string, incoming string, drop map[str
 	return strings.Join(out, ",")
 }
 
-// computeFinalAnthropicBeta 计算发往上游的最终 anthropic-beta header 值。
+// computeFinalAnthropicBetaView 计算发往上游的最终 anthropic-beta header 值。
 //
 // 设计动机：将原本在 buildUpstreamRequest 内联在一起、依赖 req.Header 的
 // anthropic-beta 计算逻辑抽成纯函数。这样调用方可以在 NewRequest 之前
@@ -511,14 +515,14 @@ func mergeAnthropicBetaDropping(required []string, incoming string, drop map[str
 //     全部过滤掉），这与原代码中 setHeaderRaw 的结果一致。
 //
 // clientHeaders 是客户端原始 HTTP header（通常为 c.Request.Header）；nil 时按“客户端
-// 未传”处理。body 是已经 metadata 重写 / billing version sync 之后但未 sanitize 上游
-// 不兼容字段之前的版本。
-func (s *GatewayService) computeFinalAnthropicBeta(
+// 未传”处理。view 是已经 metadata 重写 / billing version sync 之后但未 sanitize 上游
+// 不兼容字段之前的请求体。
+func (s *GatewayService) computeFinalAnthropicBetaView(
 	tokenType string,
 	mimicClaudeCode bool,
 	modelID string,
 	clientHeaders http.Header,
-	body []byte,
+	view *jsonBodyView,
 	effectiveDropSet map[string]struct{},
 ) (string, bool) {
 	clientBeta := ""
@@ -531,13 +535,13 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 			// mimic 路径跳过白名单透传，incomingBeta 始终为空；按真实 CLI 2.1.280
 			// 的 beta 选择规则按请求计算（haiku 的 claude-code 挪到末尾、thinking
 			// 才带 interleaved/effort 等），固定列表已无法通过上游的来源判定。
-			thinkingType := gjson.GetBytes(body, "thinking.type").String()
+			thinkingType := view.get("thinking.type").String()
 			thinkingEnabled := thinkingType == "enabled" || thinkingType == "adaptive"
 			betas := claude.ClaudeCodeMimicryBetas(modelID, thinkingEnabled)
 			// 结构化输出：2.1.283 的 sideQuery 在请求带 output_format 时把
 			// structured-outputs push 到 beta 列表末尾（SDK messages.parse() 同样追加在
 			// 末尾，Px() 只做映射不排序）；普通对话不携带。
-			if bodyHasStructuredOutputFormat(body) {
+			if bodyHasStructuredOutputFormat(view) {
 				betas = append(betas, claude.BetaStructuredOutputs)
 			}
 			return mergeAnthropicBetaDropping(betas, "", effectiveDropSet), true
@@ -551,8 +555,8 @@ func (s *GatewayService) computeFinalAnthropicBeta(
 		return stripBetaTokensWithSet(clientBeta, effectiveDropSet), true
 	}
 	if s.cfg != nil && s.cfg.Gateway.InjectBetaForAPIKey {
-		if requestNeedsBetaFeatures(body) {
-			if beta := defaultAPIKeyBetaHeader(body); beta != "" {
+		if requestNeedsBetaFeaturesView(view) {
+			if beta := defaultAPIKeyBetaHeaderView(view); beta != "" {
 				return beta, true
 			}
 		}

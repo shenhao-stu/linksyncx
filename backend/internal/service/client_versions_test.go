@@ -234,7 +234,6 @@ func TestConfiguredSDKHeadersPreserveClientIdentity(t *testing.T) {
 	claude.SetSDKVersionResolver(func() string { return "9.0.0" })
 	t.Cleanup(func() { claude.SetSDKVersionResolver(nil) })
 	require.Equal(t, "9.0.0", claude.DefaultHeaders()["X-Stainless-Package-Version"])
-	require.Contains(t, claude.EffectiveOAuthHelperUserAgent(), "/9.0.0 ")
 	svc := &IdentityService{}
 	for _, provided := range []string{"", "0.100.0"} {
 		h := http.Header{}

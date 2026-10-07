@@ -3981,6 +3981,7 @@ import Icon from '@/components/icons/Icon.vue'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import { clashErrorMessage, estimateCodexImportCount, findClashExit } from '@/utils/clash'
+import { extractApiErrorMessage } from '@/utils/apiError'
 import GroupSelector from '@/components/common/GroupSelector.vue'
 import GroupBadge from '@/components/common/GroupBadge.vue'
 import GroupKindBadge from '@/components/admin/group/GroupKindBadge.vue'
@@ -4872,8 +4873,14 @@ function applyPresetGroup(group: AdminGroup | null | undefined) {
 
 watch(
   () => props.presetGroup,
-  (group) => {
-    if (props.show) applyPresetGroup(group)
+  (group, previous) => {
+    if (!props.show) return
+    // 取消目标分组（选择器里选「不指定分组」）时一并移除它，其余手选分组保留
+    if (!group && previous) {
+      form.group_ids = form.group_ids.filter(id => id !== previous.id)
+      return
+    }
+    applyPresetGroup(group)
   }
 )
 
@@ -5748,11 +5755,8 @@ const handleVertexServiceAccountDrop = async (event: DragEvent) => {
   applyVertexServiceAccountJson(await file.text())
 }
 
+// 分组可选：未选分组的账号只供未绑定分组的 API Key 调度；选了分组时仍需满足管理分组独占
 const validateGroupSelection = (): boolean => {
-  if (!form.group_ids.length) {
-    appStore.showError(t('admin.accounts.groupRequired'))
-    return false
-  }
   if (violatesManagedExclusivity(form.group_ids, props.groups)) {
     appStore.showError(t('admin.accounts.managedGroupExclusive'))
     return false
@@ -6500,7 +6504,7 @@ const handleOpenAIExchange = async (authCode: string) => {
     emit('created')
     handleClose()
   } catch (error: any) {
-    oauthClient.error.value = clashErrorMessage(error, t) ?? (error.response?.data?.detail || t('admin.accounts.oauth.authFailed'))
+    oauthClient.error.value = clashErrorMessage(error, t) ?? extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
     appStore.showError(oauthClient.error.value)
   } finally {
     oauthClient.loading.value = false
@@ -6942,7 +6946,7 @@ const handleGeminiExchange = async (authCode: string) => {
     const extra = geminiOAuth.buildExtraInfo(tokenInfo)
     await createAccountAndFinish('gemini', 'oauth', credentials, extra)
   } catch (error: any) {
-    geminiOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    geminiOAuth.error.value = extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
     appStore.showError(geminiOAuth.error.value)
   } finally {
     geminiOAuth.loading.value = false
@@ -6988,7 +6992,7 @@ const handleAntigravityExchange = async (authCode: string) => {
 		const extra = buildAntigravityExtra()
 		await createAccountAndFinish('antigravity', 'oauth', credentials, extra)
   } catch (error: any) {
-    antigravityOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    antigravityOAuth.error.value = extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
     appStore.showError(antigravityOAuth.error.value)
   } finally {
     antigravityOAuth.loading.value = false
@@ -7025,7 +7029,7 @@ const handleGrokExchange = async (authCode: string) => {
     const extra = grokOAuth.buildExtraInfo(tokenInfo)
     await createAccountAndFinish('grok', 'oauth', credentials, extra)
   } catch (error: any) {
-    grokOAuth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    grokOAuth.error.value = extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
     appStore.showError(grokOAuth.error.value)
   } finally {
     grokOAuth.loading.value = false
@@ -7119,7 +7123,7 @@ const handleAnthropicExchange = async (authCode: string) => {
     applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
     await createAccountAndFinish(form.platform, addMethod.value as AccountType, credentials, extra)
   } catch (error: any) {
-    oauth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.authFailed')
+    oauth.error.value = extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
     appStore.showError(oauth.error.value)
   } finally {
     oauth.loading.value = false
@@ -7278,7 +7282,7 @@ const handleCookieAuth = async (sessionKey: string) => {
         errors.push(
           t('admin.accounts.oauth.keyAuthFailed', {
             index: i + 1,
-            error: clashErrorMessage(error, t) ?? (error.response?.data?.detail || t('admin.accounts.oauth.authFailed'))
+            error: clashErrorMessage(error, t) ?? extractApiErrorMessage(error, t('admin.accounts.oauth.authFailed'))
           })
         )
       }
@@ -7298,7 +7302,7 @@ const handleCookieAuth = async (sessionKey: string) => {
       oauth.error.value = errors.join('\n')
     }
   } catch (error: any) {
-    oauth.error.value = error.response?.data?.detail || t('admin.accounts.oauth.cookieAuthFailed')
+    oauth.error.value = extractApiErrorMessage(error, t('admin.accounts.oauth.cookieAuthFailed'))
   } finally {
     oauth.loading.value = false
   }

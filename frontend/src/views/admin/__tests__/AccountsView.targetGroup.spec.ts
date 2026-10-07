@@ -5,9 +5,8 @@ import { routeLocationKey, routerKey } from 'vue-router'
 
 import AccountsView from '../AccountsView.vue'
 
-const { listAccounts, countUngrouped, getAllGroups } = vi.hoisted(() => ({
+const { listAccounts, getAllGroups } = vi.hoisted(() => ({
   listAccounts: vi.fn(),
-  countUngrouped: vi.fn(),
   getAllGroups: vi.fn()
 }))
 
@@ -15,7 +14,6 @@ vi.mock('@/api/admin', () => ({
   adminAPI: {
     accounts: {
       list: listAccounts,
-      countUngrouped,
       listWithEtag: vi.fn(),
       getBatchTodayStats: vi.fn().mockResolvedValue({ stats: {} }),
       getUpstreamBillingProbeSettings: vi.fn().mockResolvedValue({ enabled: true, interval_minutes: 30 }),
@@ -58,7 +56,7 @@ const PickerStub = defineComponent({
     initialGroupId: { type: Number, default: null },
     zIndex: { type: Number, default: 50 }
   },
-  emits: ['select', 'close', 'create-group'],
+  emits: ['select', 'skip', 'close', 'create-group'],
   template: '<div v-if="show" data-test="picker" />'
 })
 
@@ -130,31 +128,26 @@ describe('admin AccountsView target group flow', () => {
     router.push.mockReset()
     router.replace.mockReset()
     listAccounts.mockReset().mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 0 })
-    countUngrouped.mockReset().mockResolvedValue(0)
     getAllGroups.mockReset().mockResolvedValue(groups)
   })
 
-  it('asks for a target group before opening the account form', async () => {
+  it('opens the account form directly without requiring a group', async () => {
     const wrapper = mountView()
     await flushPromises()
 
     await wrapper.get('[data-test="create-account"]').trigger('click')
-    expect(wrapper.find('[data-test="picker"]').exists()).toBe(true)
-    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(false)
-
-    wrapper.getComponent(PickerStub).vm.$emit('select', groups[0])
     await flushPromises()
 
     expect(wrapper.find('[data-test="picker"]').exists()).toBe(false)
-    expect(wrapper.get('[data-test="create-modal"]').text()).toBe('openai-pool')
+    expect(wrapper.getComponent(CreateModalStub).props('presetGroup')).toBeNull()
+    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(true)
   })
 
   it('reopens the picker above the form to change the target group', async () => {
+    route = reactive({ query: { create: '1', group: '5' } })
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.get('[data-test="create-account"]').trigger('click')
-    wrapper.getComponent(PickerStub).vm.$emit('select', groups[0])
-    await flushPromises()
+    expect(wrapper.get('[data-test="create-modal"]').text()).toBe('openai-pool')
 
     wrapper.getComponent(CreateModalStub).vm.$emit('change-group')
     await flushPromises()
@@ -166,19 +159,38 @@ describe('admin AccountsView target group flow', () => {
 
     picker.vm.$emit('select', groups[1])
     await flushPromises()
+    expect(wrapper.find('[data-test="picker"]').exists()).toBe(false)
     expect(wrapper.get('[data-test="create-modal"]').text()).toBe('acme-claude')
   })
 
-  it('sends the admin to the groups page to create a missing group', async () => {
+  it('lets the admin drop the target group from the picker', async () => {
+    route = reactive({ query: { create: '1', group: '5' } })
     const wrapper = mountView()
     await flushPromises()
-    await wrapper.get('[data-test="create-account"]').trigger('click')
+
+    wrapper.getComponent(CreateModalStub).vm.$emit('change-group')
+    await flushPromises()
+    wrapper.getComponent(PickerStub).vm.$emit('skip')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="picker"]').exists()).toBe(false)
+    expect(wrapper.getComponent(CreateModalStub).props('presetGroup')).toBeNull()
+    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(true)
+  })
+
+  it('sends the admin to the groups page to create a missing group', async () => {
+    route = reactive({ query: { create: '1', group: '5' } })
+    const wrapper = mountView()
+    await flushPromises()
+    wrapper.getComponent(CreateModalStub).vm.$emit('change-group')
+    await flushPromises()
 
     wrapper.getComponent(PickerStub).vm.$emit('create-group', 'managed')
     await flushPromises()
 
     expect(router.push).toHaveBeenCalledWith({ path: '/admin/groups', query: { create: '1', kind: 'managed' } })
     expect(wrapper.find('[data-test="picker"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(false)
   })
 
   it('opens the form with the group from the route and filters the list by it', async () => {
@@ -191,39 +203,17 @@ describe('admin AccountsView target group flow', () => {
     expect(router.replace).toHaveBeenCalledWith({ query: { group: '7' } })
   })
 
-  it('falls back to the picker when the route group is unknown', async () => {
+  it('opens the form without a group when the route group is unknown', async () => {
     route = reactive({ query: { create: '1', group: '999' } })
     const wrapper = mountView()
     await flushPromises()
 
-    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(false)
-    expect(wrapper.getComponent(PickerStub).props('initialGroupId')).toBe(999)
-    expect(wrapper.find('[data-test="picker"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="picker"]').exists()).toBe(false)
+    expect(wrapper.getComponent(CreateModalStub).props('presetGroup')).toBeNull()
+    expect(wrapper.find('[data-test="create-modal"]').exists()).toBe(true)
   })
 
-  it('highlights ungrouped accounts and filters to them on demand', async () => {
-    countUngrouped.mockResolvedValue(3)
-    const wrapper = mountView()
-    await flushPromises()
-
-    const banner = wrapper.get('[data-testid="accounts-ungrouped-banner"]')
-    expect(banner.text()).toContain('admin.accounts.ungroupedBanner')
-
-    const viewButton = banner.findAll('button').find(button => button.text() === 'admin.accounts.ungroupedView')
-    await viewButton!.trigger('click')
-    await flushPromises()
-
-    expect(listAccounts).toHaveBeenLastCalledWith(
-      1,
-      20,
-      expect.objectContaining({ group: 'ungrouped' }),
-      expect.anything()
-    )
-    expect(wrapper.find('[data-testid="accounts-ungrouped-banner"]').exists()).toBe(false)
-  })
-
-  it('keeps the banner hidden when the count is unavailable', async () => {
-    countUngrouped.mockRejectedValue(new Error('boom'))
+  it('does not nag about ungrouped accounts', async () => {
     const wrapper = mountView()
     await flushPromises()
 

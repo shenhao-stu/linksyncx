@@ -27,6 +27,15 @@ func (c *failingIdentityCache) CreateFingerprint(context.Context, int64, *Finger
 func (c *failingIdentityCache) GetOrCreateMaskedSessionID(context.Context, int64, string) (string, error) {
 	return "", c.err
 }
+func (c *failingIdentityCache) GetOrCreateAmbientSessionID(context.Context, int64, string) (string, error) {
+	return "", c.err
+}
+func (c *failingIdentityCache) SetLastActiveSessionID(context.Context, int64, string) error {
+	return c.err
+}
+func (c *failingIdentityCache) GetLastActiveSessionID(context.Context, int64) (string, error) {
+	return "", c.err
+}
 
 // Storage failure must not invent an unpersisted identity or silently bypass masking.
 func TestIdentityService_CacheFailurePropagatesWithoutTransientIdentity(t *testing.T) {
@@ -42,4 +51,18 @@ func TestIdentityService_CacheFailurePropagatesWithoutTransientIdentity(t *testi
 	out, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc", strings.Repeat("cd", 32), claude.DefaultUserAgent())
 	require.ErrorContains(t, err, "account session unavailable")
 	require.Nil(t, out)
+}
+
+func TestIdentityService_EmptyMaskedSessionFailsClosed(t *testing.T) {
+	svc := NewIdentityService(&failingIdentityCache{})
+	account := &Account{ID: 1, Extra: map[string]any{"session_id_masking_enabled": true}}
+	uid := FormatMetadataUserID(strings.Repeat("ab", 32), "acc", "11111111-2222-4333-8444-555555555555", "2.1.280")
+	body, err := sjson.SetBytes([]byte(`{"metadata":{}}`), "metadata.user_id", uid)
+	require.NoError(t, err)
+	out, err := svc.RewriteUserIDWithMasking(t.Context(), body, account, "acc", strings.Repeat("cd", 32), claude.DefaultUserAgent())
+	require.ErrorIs(t, err, ErrClientIdentityUnavailable)
+	require.Nil(t, out)
+	sessionID, err := svc.ResolveSessionIDWithoutMetadata(t.Context(), account, "client-session")
+	require.ErrorIs(t, err, ErrClientIdentityUnavailable)
+	require.Empty(t, sessionID)
 }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -68,7 +69,30 @@ func normalizeObservedUpstreamResponseModel(model string) string {
 	return model
 }
 
+var (
+	jsonModelKeyLiteral = []byte(`"model"`)
+	// jsonEscapedLowercasePrefix 是 m/o/d/e/l 写成 \uXXXX 转义时的公共前缀（码点都在 0x64-0x6F）。
+	jsonEscapedLowercasePrefix       = []byte{'\\', 'u', '0', '0', '6'}
+	jsonEscapedLowercasePrefixString = string(jsonEscapedLowercasePrefix)
+)
+
+// jsonMayHaveModelKey 报告载荷中是否可能存在名为 model 的键：键名要么字面出现
+// "model"，要么至少有一个字母写成 \u006X 转义。返回 false 时 gjson 必然找不到
+// model 键，可以安全跳过查找。
+func jsonMayHaveModelKey(payload []byte) bool {
+	return bytes.Contains(payload, jsonModelKeyLiteral) || bytes.Contains(payload, jsonEscapedLowercasePrefix)
+}
+
+// jsonStringMayHaveModelKey 是 jsonMayHaveModelKey 的 string 版本。
+func jsonStringMayHaveModelKey(payload string) bool {
+	return strings.Contains(payload, `"model"`) || strings.Contains(payload, jsonEscapedLowercasePrefixString)
+}
+
 func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType string) {
+	// 没有 model 键的事件（各类 delta）不会声明模型或档位，跳过两次查找。
+	if !jsonMayHaveModelKey(payload) {
+		return
+	}
 	model := firstValidTrimmedGJSONString(payload, "response.model", "model")
 	terminal := isUpstreamResponseModelTerminalEvent(eventType)
 	o.Observe(model, terminal)
@@ -88,6 +112,9 @@ func (o *upstreamResponseModelObserver) ObserveOpenAI(payload []byte, eventType 
 }
 
 func (o *upstreamResponseModelObserver) ObserveAnthropic(payload []byte) {
+	if !jsonMayHaveModelKey(payload) {
+		return
+	}
 	model := firstValidTrimmedGJSONString(payload, "message.model", "model")
 	o.Observe(model, false)
 	// usage.speed travels with the message object (message_start in streams,

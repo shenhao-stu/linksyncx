@@ -65,6 +65,17 @@ func TestCRSIdentityFailureStopsRequestBuilders(t *testing.T) {
 	require.Nil(t, req)
 }
 
+func TestCRSEmptyIdentityWriteResultIsUnavailable(t *testing.T) {
+	for _, fingerprint := range []*Fingerprint{nil, {
+		ClientID: "existing", UserAgent: claude.DefaultUserAgent(), UpdatedAt: time.Now().Add(-48 * time.Hour).Unix(),
+	}} {
+		cache := &unavailableIdentityCache{fingerprint: fingerprint}
+		value, err := NewIdentityService(cache).GetOrCreateFingerprint(t.Context(), 1, http.Header{})
+		require.ErrorIs(t, err, ErrClientIdentityUnavailable)
+		require.Nil(t, value)
+	}
+}
+
 func TestCRSNativePassThroughDoesNotRequireCachedIdentity(t *testing.T) {
 	gatewayForwardingCache.Store(&cachedGatewayForwardingSettings{
 		fingerprintUnification: false,
@@ -98,7 +109,7 @@ func TestCRSNativePassThroughDoesNotRequireCachedIdentity(t *testing.T) {
 				require.Equal(t, gjson.GetBytes(body, "metadata.user_id").String(), gjson.GetBytes(out, "metadata.user_id").String())
 			}
 			req, _, err = build(true)
-			require.ErrorContains(t, err, "account identity unavailable")
+			requireIdentityStoreFailure(t, err)
 			require.Nil(t, req)
 		})
 	}
@@ -199,10 +210,10 @@ func TestCRSMaskingFailureStopsRequestBuilders(t *testing.T) {
 	uid := FormatMetadataUserID("device", "account", "11111111-2222-4333-8444-555555555555", "2.1.280")
 	body := []byte(`{"model":"claude-sonnet-4-5","messages":[],"metadata":{"user_id":` + strconvQuote(uid) + `}}`)
 	req, _, err := svc.buildUpstreamRequest(t.Context(), nil, account, body, "dummy", "oauth", "claude-sonnet-4-5", false, false)
-	require.ErrorContains(t, err, "session storage unavailable")
+	requireIdentityStoreFailure(t, err)
 	require.Nil(t, req)
 	req, _, err = svc.buildCountTokensRequest(t.Context(), nil, account, body, "dummy", "oauth", "claude-sonnet-4-5", false)
-	require.ErrorContains(t, err, "session storage unavailable")
+	requireIdentityStoreFailure(t, err)
 	require.Nil(t, req)
 }
 
@@ -297,4 +308,65 @@ func TestCRSNativeBillingSyntheticSamplesAreOpaque(t *testing.T) {
 			}
 		}
 	}
+}
+
+func requireIdentityStoreFailure(t *testing.T, err error) {
+	t.Helper()
+	var failover *UpstreamFailoverError
+	if errors.As(err, &failover) {
+		require.Equal(t, http.StatusServiceUnavailable, failover.StatusCode)
+		require.True(t, failover.RequestScopedTransient)
+		return
+	}
+	require.ErrorIs(t, err, ErrClientIdentityUnavailable)
+}
+
+func TestCRSNativeSessionHeaderDoesNotCreateStoredIdentity(t *testing.T) {
+	resetGatewayForwardingSettingsCacheForTest(t)
+	cache := newMemoryIdentityCache()
+	cfg := &config.Config{}
+	svc := &GatewayService{
+		identityService: NewIdentityService(cache),
+		settingService: NewSettingService(&gatewayTTLSettingRepo{data: map[string]string{
+			SettingKeyEnableFingerprintUnification: "false",
+			SettingKeyEnableMetadataPassthrough:    "true",
+		}}, cfg),
+	}
+	account := newAnthropicOAuthAccountForPartialUsageTest()
+	body := []byte(`{"model":"claude-sonnet-4-5","messages":[]}`)
+	for _, session := range []string{"", "client-session"} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+		if session != "" {
+			c.Request.Header.Set("X-Claude-Code-Session-Id", session)
+		}
+		req, _, err := svc.buildUpstreamRequest(t.Context(), c, account, body, "dummy", "oauth", "claude-sonnet-4-5", false, false)
+		require.NoError(t, err)
+		require.Equal(t, session, getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"))
+		req, _, err = svc.buildCountTokensRequest(t.Context(), c, account, body, "dummy", "oauth", "claude-sonnet-4-5", false)
+		require.NoError(t, err)
+		require.Equal(t, session, getHeaderRaw(req.Header, "X-Claude-Code-Session-Id"))
+	}
+	require.Empty(t, cache.fingerprint)
+	require.Empty(t, cache.masked)
+	require.Empty(t, cache.ambient)
+	require.Empty(t, cache.last)
+	require.Zero(t, cache.lastWrites)
+}
+
+func TestCRSMissingMetadataDoesNotBypassRequiredSessionStore(t *testing.T) {
+	cache := &unavailableIdentityCache{fingerprint: &Fingerprint{ClientID: "stable", UserAgent: claude.DefaultUserAgent(), UpdatedAt: time.Now().Unix()}}
+	svc := &GatewayService{identityService: NewIdentityService(cache)}
+	account := newAnthropicOAuthAccountForPartialUsageTest()
+	account.Extra = map[string]any{"account_uuid": "account", "session_id_masking_enabled": true}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Request.Header.Set("X-Claude-Code-Session-Id", "client-session-must-not-leak")
+	body := []byte(`{"model":"claude-sonnet-4-5","messages":[]}`)
+	req, _, err := svc.buildUpstreamRequest(t.Context(), c, account, body, "dummy", "oauth", "claude-sonnet-4-5", false, false)
+	requireIdentityStoreFailure(t, err)
+	require.Nil(t, req)
+	req, _, err = svc.buildCountTokensRequest(t.Context(), c, account, body, "dummy", "oauth", "claude-sonnet-4-5", false)
+	requireIdentityStoreFailure(t, err)
+	require.Nil(t, req)
 }

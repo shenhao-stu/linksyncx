@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"fmt"
 	"hash/fnv"
 	"math/rand"
@@ -307,19 +308,23 @@ func isDeferredLoadingTool(tool gjson.Result) bool {
 // stripDeferredToolCacheControl removes the cache marker Anthropic rejects on
 // deferred tools. Only the literal JSON boolean true enables deferred loading.
 func stripDeferredToolCacheControl(body []byte) []byte {
-	tools := gjson.GetBytes(body, "tools")
+	view := newJSONBodyView(body, nil)
+	stripDeferredToolCacheControlView(view)
+	return view.data
+}
+
+// stripDeferredToolCacheControlView 是 stripDeferredToolCacheControl 作用于 jsonBodyView 的版本。
+func stripDeferredToolCacheControlView(view *jsonBodyView) {
+	tools := view.get("tools")
 	if !tools.IsArray() {
-		return body
+		return
 	}
 	for idx, tool := range tools.Array() {
 		if !isDeferredLoadingTool(tool) || !tool.Get("cache_control").Exists() {
 			continue
 		}
-		if next, err := sjson.DeleteBytes(body, fmt.Sprintf("tools.%d.cache_control", idx)); err == nil {
-			body = next
-		}
+		_ = view.deletePath(fmt.Sprintf("tools.%d.cache_control", idx))
 	}
-	return body
 }
 
 // restoreToolNamesInBytes 对 bytes chunk 做逆向还原：假名 → 真名。
@@ -345,8 +350,9 @@ func restoreToolNamesInBytes(data []byte, rw *ToolNameRewrite) []byte {
 }
 
 // replaceAllBytes 是 bytes.ReplaceAll 的便捷封装，避免每个调用点各自做 []byte 转换。
+// 未命中时直接返回原切片：流式响应逐事件调用，查找不能先把整块数据拷贝成 string。
 func replaceAllBytes(data []byte, from, to string) []byte {
-	if len(data) == 0 || from == to || !strings.Contains(string(data), from) {
+	if len(data) == 0 || from == to || !bytes.Contains(data, []byte(from)) {
 		return data
 	}
 	return []byte(strings.ReplaceAll(string(data), from, to))

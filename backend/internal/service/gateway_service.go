@@ -274,6 +274,11 @@ func shortSessionHash(sessionHash string) string {
 }
 
 func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) string {
+	return buildClaudeMimicDebugLineView(req, newJSONBodyView(body, nil), account, tokenType, mimicClaudeCode)
+}
+
+// buildClaudeMimicDebugLineView 是 buildClaudeMimicDebugLine 作用于 jsonBodyView 的版本。
+func buildClaudeMimicDebugLineView(req *http.Request, view *jsonBodyView, account *Account, tokenType string, mimicClaudeCode bool) string {
 	if req == nil {
 		return ""
 	}
@@ -285,7 +290,7 @@ func buildClaudeMimicDebugLine(req *http.Request, body []byte, account *Account,
 		tokenType = "other"
 	}
 	return fmt.Sprintf("account_id=%d token_type=%s mimic=%t request=%s",
-		accountID, tokenType, mimicClaudeCode, gatewayDiagnosticJSON(req.Header, body))
+		accountID, tokenType, mimicClaudeCode, gatewayDiagnosticJSON(req.Header, view.data))
 }
 
 func logClaudeMimicDebug(req *http.Request, body []byte, account *Account, tokenType string, mimicClaudeCode bool) {
@@ -305,10 +310,7 @@ func isClaudeCodeCredentialScopeError(msg string) bool {
 		strings.Contains(m, "cannot be used for other api requests")
 }
 
-// sseDataRe matches SSE data lines with optional whitespace after colon.
-// Some upstream APIs return non-standard "data:" without space (should be "data: ").
 var (
-	sseDataRe            = regexp.MustCompile(`^data:\s*`)
 	claudeCliUserAgentRe = regexp.MustCompile(`(?i)^claude-cli/\d+\.\d+\.\d+`)
 
 	// claudeCodePromptPrefixes 用于检测 Claude Code 系统提示词的前缀列表
@@ -804,7 +806,7 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 	if parsed.MetadataUserID != "" {
 		uid := ParseMetadataUserID(parsed.MetadataUserID)
 		if uid != nil && uid.SessionID != "" {
-			slog.Info("sticky.hash_source",
+			slog.Debug("sticky.hash_source",
 				"source", "metadata_user_id",
 				"session_id", uid.SessionID,
 				"device_id", uid.DeviceID,
@@ -812,7 +814,7 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 			)
 			return uid.SessionID
 		}
-		slog.Info("sticky.hash_metadata_parse_failed",
+		slog.Debug("sticky.hash_metadata_parse_failed",
 			"metadata_user_id", parsed.MetadataUserID,
 			"parsed_nil", uid == nil,
 		)
@@ -822,7 +824,7 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 	cacheableContent := s.extractCacheableContent(parsed)
 	if cacheableContent != "" {
 		hash := s.hashContent(cacheableContent)
-		slog.Info("sticky.hash_source",
+		slog.Debug("sticky.hash_source",
 			"source", "cacheable_content",
 			"hash", hash,
 		)
@@ -850,7 +852,7 @@ func (s *GatewayService) GenerateSessionHash(parsed *ParsedRequest) string {
 	}
 	if combined.Len() > 0 {
 		hash := s.hashContent(combined.String())
-		slog.Info("sticky.hash_source",
+		slog.Debug("sticky.hash_source",
 			"source", "message_content_fallback",
 			"hash", hash,
 			"content_len", combined.Len(),

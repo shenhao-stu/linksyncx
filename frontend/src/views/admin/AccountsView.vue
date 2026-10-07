@@ -14,7 +14,7 @@
           <AccountTableActions
             :loading="loading"
             @refresh="handleManualRefresh"
-            @create="openCreateFlow()"
+            @create="openCreateAccount()"
           >
             <template #after>
               <!-- Auto Refresh Dropdown -->
@@ -172,29 +172,6 @@
           >
             {{ t('admin.accounts.listPendingSyncAction') }}
           </button>
-        </div>
-        <div
-          v-if="showUngroupedBanner"
-          class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
-          role="status"
-          data-testid="accounts-ungrouped-banner"
-        >
-          <span class="flex min-w-0 items-start gap-2">
-            <Icon name="exclamationTriangle" size="sm" class="mt-0.5 shrink-0" />
-            <span>{{ t('admin.accounts.ungroupedBanner', { count: ungroupedCount }) }}</span>
-          </span>
-          <span class="flex shrink-0 items-center gap-1">
-            <button class="btn btn-secondary px-2 py-1 text-xs" @click="showUngroupedAccounts">
-              {{ t('admin.accounts.ungroupedView') }}
-            </button>
-            <button
-              class="rounded-md p-1 text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/40"
-              :aria-label="t('common.close')"
-              @click="ungroupedBannerDismissed = true"
-            >
-              <Icon name="x" size="sm" />
-            </button>
-          </span>
         </div>
       </template>
       <template #table>
@@ -496,6 +473,7 @@
       :z-index="showCreate ? 60 : 50"
       @close="showTargetGroupPicker = false"
       @select="handleTargetGroupSelected"
+      @skip="openCreateAccount()"
       @create-group="handleCreateGroupFromPicker"
     />
     <CreateAccountModal
@@ -506,7 +484,7 @@
       :preset-group="createPresetGroup"
       @close="closeCreateAccount"
       @created="handleAccountCreated"
-      @change-group="openCreateFlow(createPresetGroup?.id ?? null)"
+      @change-group="openTargetGroupPicker(createPresetGroup?.id ?? null)"
     />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :clash-exits="clashExits" :groups="groups" @close="showEdit = false" @updated="handleAccountEdited" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
@@ -669,8 +647,6 @@ const showCreate = ref(false)
 const showTargetGroupPicker = ref(false)
 const targetGroupPickerInitialId = ref<number | null>(null)
 const createPresetGroup = ref<AdminGroup | null>(null)
-const ungroupedCount = ref(0)
-const ungroupedBannerDismissed = ref(false)
 const showEdit = ref(false)
 const showSync = ref(false)
 const showImportData = ref(false)
@@ -1248,7 +1224,6 @@ const load = async (options: AccountLoadOptions = {}) => {
 }
 
 const reload = async () => {
-  void refreshUngroupedCount()
   syncAccountListDerivedParams()
   hasPendingListSync.value = false
   resetAutoRefreshCache()
@@ -2214,17 +2189,20 @@ const handleBulkUpdated = () => {
 const handleDataImported = () => { showImportData.value = false; reload() }
 const ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE = 'ungrouped'
 
-// ==================== 先选分组再建号 ====================
-const openCreateFlow = (initialGroupId: number | null = null) => {
-  targetGroupPickerInitialId.value = initialGroupId
-  showTargetGroupPicker.value = true
-}
-const handleTargetGroupSelected = (group: AdminGroup) => {
+// ==================== 建号（分组可选） ====================
+// 分组不是建号前置条件：直接打开表单，分组可在表单内选择或留空。
+// 目标分组只来自路由意图（分组页「添加账号」），表单内可通过选择器更换或取消。
+const openCreateAccount = (group: AdminGroup | null = null) => {
   createPresetGroup.value = group
   showTargetGroupPicker.value = false
   showCreate.value = true
   void loadClashExits()
 }
+const openTargetGroupPicker = (initialGroupId: number | null = null) => {
+  targetGroupPickerInitialId.value = initialGroupId
+  showTargetGroupPicker.value = true
+}
+const handleTargetGroupSelected = (group: AdminGroup) => openCreateAccount(group)
 const closeCreateAccount = () => {
   showCreate.value = false
   createPresetGroup.value = null
@@ -2235,25 +2213,7 @@ const handleCreateGroupFromPicker = (kind: GroupKind) => {
   void router?.push({ path: '/admin/groups', query: { create: '1', kind } })
 }
 
-// ==================== 存量未分组账号提示 ====================
-const showUngroupedBanner = computed(() =>
-  ungroupedCount.value > 0 && !ungroupedBannerDismissed.value && params.group !== ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE
-)
-async function refreshUngroupedCount() {
-  try {
-    ungroupedCount.value = await adminAPI.accounts.countUngrouped()
-  } catch {
-    // 提示条只是引导，统计失败时静默隐藏
-    ungroupedCount.value = 0
-  }
-}
-const showUngroupedAccounts = () => {
-  params.group = ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE
-  pagination.page = 1
-  reload()
-}
-
-// 路由意图：?group=ID|ungrouped 预置分组筛选；?create=1 直接进入建号流程（可配合 group 预选分组）
+// 路由意图：?group=ID|ungrouped 预置分组筛选；?create=1 直接打开建号表单（可配合 group 预选分组）
 const POSITIVE_ID_PATTERN = /^[1-9]\d*$/
 const firstQueryValue = (value: unknown): string => {
   const raw = Array.isArray(value) ? value[0] : value
@@ -2269,8 +2229,7 @@ const consumeCreateIntent = () => {
   if (firstQueryValue(route?.query.create) !== '1') return
   const groupId = POSITIVE_ID_PATTERN.test(routeGroupFilter) ? Number(routeGroupFilter) : null
   const preset = groupId === null ? undefined : groups.value.find(group => group.id === groupId)
-  if (preset) handleTargetGroupSelected(preset)
-  else openCreateFlow(groupId)
+  openCreateAccount(preset ?? null)
   const rest = { ...(route?.query ?? {}) }
   delete rest.create
   void router?.replace({ query: rest })
@@ -2721,7 +2680,6 @@ onMounted(async () => {
     console.error('Failed to load groups:', groupsResult.reason)
   }
   consumeCreateIntent()
-  void refreshUngroupedCount()
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', handleViewportResize)
   document.addEventListener('click', handleClickOutside)

@@ -7,7 +7,7 @@ populated from the running release's built-in pins, including any supported
 existing custom/environment override. Click **Save version settings** to persist;
 ordinary settings saves do not overwrite these separately managed choices.
 
-| Client | Built-in pin in upstream 0.2.9.2 | Official stable metadata |
+| Client | Built-in pin in upstream 0.2.9.4 | Official stable metadata |
 | --- | --- | --- |
 | Grok CLI | 1.0.46 | https://x.ai/cli/stable |
 | Claude Code CLI | 2.1.287 | https://api.github.com/repos/anthropics/claude-code/releases/latest |
@@ -34,7 +34,8 @@ DB read failures never authorize a fetch. Disabling while a fetch is running
 discards its result. Shutdown cancels in-flight checks. This cadence is per
 service instance; the deployment uses one API replica.
 
-Version settings affect gateway-generated headers and the OAuth SDK helper.
+Version settings affect gateway-generated headers. OAuth token exchange and refresh
+follow the upstream dedicated token-endpoint transport, independently of the SDK pin.
 Grok uses one resolver for service and final transport headers. Claude SDK
 runtime settings cover defaults and newly persisted identities explicitly marked
 as originating from gateway defaults. Client-supplied SDK values and legacy

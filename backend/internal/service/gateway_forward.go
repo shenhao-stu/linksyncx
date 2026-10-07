@@ -121,7 +121,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	beginUpstreamResponseModelObservation(c)
 
 	// Web Search 模拟：纯 web_search 请求时，直接调用搜索 API 构造响应
-	if account != nil && s.shouldEmulateWebSearch(ctx, account, parsed.GroupID, parsed.Body.Bytes()) {
+	if account != nil && s.shouldEmulateWebSearchView(ctx, account, parsed.GroupID, newJSONBodyView(parsed.Body.Bytes(), parsed.bodyIndex)) {
 		return s.handleWebSearchEmulation(ctx, c, account, parsed)
 	}
 
@@ -213,7 +213,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// 导致 messages 级缓存永远 miss、cache_creation 每轮全量重写。
 	// 通过检查 body 中的 billing attribution block 来识别被代理的真实 CC 流量。
 	if !isClaudeCode && parsed.MetadataUserID != "" {
-		isClaudeCode = systemHasBillingAttributionBlock(body)
+		isClaudeCode = systemHasBillingAttributionBlock(newJSONBodyView(body, parsed.bodyIndex))
 	}
 
 	shouldMimicClaudeCode := account.IsOAuth() && !isClaudeCode
@@ -236,7 +236,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 		if s.identityService != nil && c != nil {
 			fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header)
 			if err != nil {
-				return nil, fmt.Errorf("account identity unavailable: %w", err)
+				return nil, claudeIdentityUnavailableFailover(account, err)
 			}
 			if fp != nil {
 				// metadata 透传开启时跳过 metadata 注入
@@ -290,7 +290,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	}
 
 	// 强制执行 cache_control 块数量限制（最多 4 个）
-	if err := replaceBody(enforceCacheControlLimit(body)); err != nil {
+	if err := replaceBody(enforceCacheControlLimitIndexed(body, parsed.bodyIndex)); err != nil {
 		return nil, err
 	}
 
@@ -390,7 +390,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	//
 	// 仅 anthropic-strict 模型族执行此过滤；passback-required 上游 (DeepSeek/Kimi/GLM 等)
 	// 要求历史 thinking block 原样回传，过滤反而制造 400。reqModel 此时已是映射后的模型 ID。
-	if err := replaceBody(FilterThinkingBlocks(body, reqModel)); err != nil {
+	if err := replaceBody(filterThinkingBlocksIndexed(body, reqModel, parsed.bodyIndex)); err != nil {
 		return nil, err
 	}
 	// Chinese LLM thinking.type 协议差异补正（如 MiniMax 只接受 adaptive；Anthropic-SDK
@@ -407,17 +407,19 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 	// 重试循环
 	var resp *http.Response
 	lastWireBody := body
+	var lastWireIndex *jsonBodyIndex // lastWireBody 的顶层索引；重试改写过请求体时为 nil
 	retryStart := time.Now()
 	for attempt := 1; attempt <= maxRetryAttempts; attempt++ {
 		// 构建上游请求（每次重试需要重新构建，因为请求体需要重新读取）
 		upstreamCtx, releaseUpstreamCtx := detachStreamUpstreamContext(ctx, reqStream)
-		upstreamReq, wireBody, err := s.buildUpstreamRequest(upstreamCtx, c, account, body, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
+		upstreamReq, wireBody, wireIndex, err := s.buildUpstreamRequestIndexed(upstreamCtx, c, account, body, parsed.bodyIndex, token, tokenType, reqModel, reqStream, shouldMimicClaudeCode)
 		releaseUpstreamCtx()
 		if err != nil {
 			return nil, err
 		}
 		// 记录本次实际发送的 wire body；只有请求成功后才写回 ParsedRequest，避免 400 retry 基于已签名 CCH 再改写。
 		lastWireBody = wireBody
+		lastWireIndex = wireIndex
 
 		// 发送请求
 		resp, err = s.httpUpstream.DoWithTLS(upstreamReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
@@ -488,6 +490,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 							if retryResp.StatusCode < 400 {
 								// 重试请求被上游接受后同步 ParsedRequest，保证 usage/日志看到真实请求体。
 								lastWireBody = retryWireBody
+								lastWireIndex = nil
 								if err := replaceBody(retryWireBody); err != nil {
 									_ = retryResp.Body.Close()
 									return nil, err
@@ -531,6 +534,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 											if retryResp2.StatusCode < 400 {
 												// 二阶段工具块降级成功时也必须更新当前 body。
 												lastWireBody = retryWireBody2
+												lastWireIndex = nil
 												if err := replaceBody(retryWireBody2); err != nil {
 													_ = retryResp2.Body.Close()
 													return nil, err
@@ -614,6 +618,7 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 								if budgetRetryResp.StatusCode < 400 {
 									// budget 修正请求成功后，ParsedRequest 也要描述被接受的修正版。
 									lastWireBody = budgetWireBody
+									lastWireIndex = nil
 									if err := replaceBody(budgetWireBody); err != nil {
 										_ = budgetRetryResp.Body.Close()
 										return nil, err
@@ -823,17 +828,24 @@ func (s *GatewayService) Forward(ctx context.Context, c *gin.Context, account *A
 
 	// 处理正常响应
 
-	if !bytes.Equal(lastWireBody, body) {
-		// 成功后再同步最终 wire body，避免失败重试从已签名 CCH 的 body 继续派生。
-		if err := replaceBody(lastWireBody); err != nil {
-			return nil, err
-		}
-	}
-
 	// 触发上游接受回调（提前释放串行锁，不等流完成）
 	if parsed.OnUpstreamAccepted != nil {
 		parsed.OnUpstreamAccepted()
 	}
+
+	// 成功后再同步最终 wire body，避免失败重试从已签名 CCH 的 body 继续派生；usage
+	// 指纹与日志也要看到上游实际接受的请求体。同步是一次全量重解析，放到响应转发
+	// 之后执行，不卡在上游响应头与客户端首字节之间。此后不再从 body 派生重试，
+	// 同步失败只影响 usage 指纹，记录日志即可。
+	defer func() {
+		if bytes.Equal(lastWireBody, body) {
+			return
+		}
+		// 构建请求时维持了 wire body 的顶层索引，同步时直接复用，免去全量校验与扫描。
+		if err := parsed.replaceBodyIndexed(lastWireBody, lastWireIndex); err != nil {
+			logger.LegacyPrintf("service.gateway", "Account %d: sync accepted wire body failed: %v", account.ID, fmt.Errorf("rewrite request body: %w", err))
+		}
+	}()
 
 	var usage *ClaudeUsage
 	var firstTokenMs *int
