@@ -987,6 +987,9 @@ func TestAPIContracts(t *testing.T) {
 					"balance_low_notify_enabled": false,
 					"account_quota_notify_enabled": false,
 					"account_scheduling_thresholds": {"anthropic":100,"grok":100,"openai":100},
+					"claude_default_max_sessions": 5,
+					"claude_sticky_hold_enabled": true,
+					"claude_sticky_hold_max_wait_minutes": 10,
 					"subscription_expiry_notify_enabled": true,
 					"balance_low_notify_threshold": 0,
 					"balance_low_notify_recharge_url": "",
@@ -1305,6 +1308,9 @@ func TestAPIContracts(t *testing.T) {
 					"balance_low_notify_enabled": false,
 					"account_quota_notify_enabled": false,
 					"account_scheduling_thresholds": {"anthropic":100,"grok":100,"openai":100},
+					"claude_default_max_sessions": 5,
+					"claude_sticky_hold_enabled": true,
+					"claude_sticky_hold_max_wait_minutes": 10,
 					"subscription_expiry_notify_enabled": true,
 					"balance_low_notify_threshold": 0,
 					"balance_low_notify_recharge_url": "",
@@ -2038,6 +2044,10 @@ func (s *stubAccountRepo) ClearModelRateLimits(ctx context.Context, id int64) er
 
 func (s *stubAccountRepo) UpdateSessionWindow(ctx context.Context, id int64, start, end *time.Time, status string) error {
 	return errors.New("not implemented")
+}
+
+func (s *stubAccountRepo) ApplyClaudeRateLimitPatch(ctx context.Context, id int64, patch service.ClaudeRateLimitPatch) (bool, error) {
+	return true, nil
 }
 
 func (s *stubAccountRepo) UpdateSessionWindowEnd(ctx context.Context, id int64, end time.Time) error {

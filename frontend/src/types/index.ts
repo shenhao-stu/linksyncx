@@ -1470,6 +1470,13 @@ export interface OpenCodeGoUsageSettings {
   debounce_minutes: number
 }
 
+/** Claude 登录凭据（refresh token）的重新授权提示 */
+export interface AccountReauthNotice {
+  expires_at: string
+  days_left: number
+  expired: boolean
+}
+
 export interface Account {
   id: number
   name: string
@@ -1604,7 +1611,10 @@ export interface Account {
   // 运行时状态（仅当启用对应限制时返回）
   current_window_cost?: number | null // 当前窗口费用
   active_sessions?: number | null // 当前活跃会话数
+  session_budget?: number | null // 生效的会话预算（账号配置、单会话模式或系统默认值）
   current_rpm?: number | null // 当前分钟 RPM 计数
+  // Claude 登录凭据（refresh token）已过期，或期限固定且不足 3 天时的「需重新授权」提示
+  reauth_notice?: AccountReauthNotice | null
 
   // 影子账号关系（spark 维度影子）
   parent_account_id?: number | null
@@ -1753,7 +1763,7 @@ export interface AccountUsageInfo {
 
 /** Claude 订阅档位（GET /api/oauth/profile 归一化后写入 extra.claude_subscription）。 */
 export interface ClaudeSubscriptionInfo {
-  /** free / pro / max / max_5x / max_20x / team / enterprise，未知组织类型保留原值 */
+  /** free / pro / max / max_5x / max_20x / team / team_standard / team_premium / enterprise，未知组织类型保留原值 */
   plan_type: string
   organization_type?: string
   rate_limit_tier?: string

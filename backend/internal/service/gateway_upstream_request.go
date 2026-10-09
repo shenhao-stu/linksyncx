@@ -61,6 +61,8 @@ func (s *GatewayService) buildUpstreamRequestIndexed(ctx context.Context, c *gin
 
 	// OAuth账号：应用统一指纹和metadata重写（受设置开关控制）
 	var fingerprint *Fingerprint
+	// identityEpoch 是账号当前身份代次，会话头与 metadata.user_id 按同一代次映射。
+	var identityEpoch int64
 	enableFP, enableMPT := true, false
 	if s.settingService != nil {
 		enableFP, enableMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
@@ -69,10 +71,11 @@ func (s *GatewayService) buildUpstreamRequestIndexed(ctx context.Context, c *gin
 	// an identity-store dependency when both identity transformations are off.
 	if account.IsOAuth() && s.identityService != nil && (enableFP || !enableMPT || mimicClaudeCode) {
 		// 1. 获取或创建指纹（包含随机生成的ClientID）
-		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
+		fp, err := s.identityService.GetOrCreateAccountFingerprint(ctx, account, clientHeaders)
 		if err != nil {
 			return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
 		}
+		identityEpoch = fp.IdentityEpoch
 		if enableFP {
 			fingerprint = fp
 		}
@@ -83,7 +86,7 @@ func (s *GatewayService) buildUpstreamRequestIndexed(ctx context.Context, c *gin
 		if !enableMPT {
 			accountUUID := account.GetExtraString("account_uuid")
 			if accountUUID != "" && fp.ClientID != "" {
-				if err := s.identityService.rewriteUserIDWithMaskingView(ctx, view, account, accountUUID, fp.ClientID, fp.UserAgent); err != nil {
+				if err := s.identityService.rewriteUserIDWithMaskingView(ctx, view, account, accountUUID, fp); err != nil {
 					return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
 				}
 			}
@@ -209,8 +212,13 @@ func (s *GatewayService) buildUpstreamRequestIndexed(ctx context.Context, c *gin
 	// 按 ResolveSessionIDWithoutMetadata 选账号作用域的会话，覆盖透传来的客户端
 	// 原始会话头（未映射的原值会和本对话 messages 请求的会话对不上）。
 	if tokenType == "oauth" {
-		if err := s.syncClaudeSessionHeader(ctx, account, req.Header, clientHeaders, view.get("metadata.user_id").String(), !enableFP && enableMPT && !mimicClaudeCode); err != nil {
+		if err := s.syncClaudeSessionHeader(ctx, account, identityEpoch, req.Header, clientHeaders, view.get("metadata.user_id").String(), !enableFP && enableMPT && !mimicClaudeCode); err != nil {
 			return nil, nil, nil, claudeIdentityUnavailableFailover(account, err)
+		}
+		if getHeaderRaw(req.Header, "x-claude-code-prompt-id") == "" {
+			if pid := extractBillingPromptIDView(view); pid != "" {
+				setHeaderRaw(req.Header, "x-claude-code-prompt-id", pid)
+			}
 		}
 	}
 
@@ -393,7 +401,11 @@ func (s *GatewayService) getBetaHeader(modelID string, clientBetaHeader string) 
 
 	// OAuth 真实客户端透传且客户端没传 beta 时，根据模型生成默认值。
 	// Haiku 的透传默认值不补 claude-code beta；mimic 路径不会调用本分支。
-	if strings.Contains(strings.ToLower(modelID), "haiku") {
+	// haiku-5-5 起能力集对齐非 haiku（2.1.293 抓包实证），用 Haiku5BetaHeader。
+	if lower := strings.ToLower(modelID); strings.Contains(lower, "haiku") {
+		if strings.Contains(lower, "haiku-5") {
+			return claude.Haiku5BetaHeader
+		}
 		return claude.HaikuBetaHeader
 	}
 
@@ -422,7 +434,11 @@ func defaultAPIKeyBetaHeader(body []byte) string {
 
 func defaultAPIKeyBetaHeaderView(view *jsonBodyView) string {
 	modelID := view.get("model").String()
-	if strings.Contains(strings.ToLower(modelID), "haiku") {
+	if lower := strings.ToLower(modelID); strings.Contains(lower, "haiku") {
+		// haiku-5-5 起能力集对齐非 haiku（2.1.293 抓包实证）
+		if strings.Contains(lower, "haiku-5") {
+			return claude.APIKeyHaiku5BetaHeader
+		}
 		return claude.APIKeyHaikuBetaHeader
 	}
 	return claude.APIKeyBetaHeader
@@ -919,6 +935,14 @@ func applyClaudeCodeMimicHeaders(req *http.Request, mimicUserAgent string, first
 		// Real Claude CLI 每个第一方请求都会生成一个新的 UUID 放在 x-client-request-id。
 		// 上游会以此作为会话/请求指纹的一部分，缺失或重复都可能触发第三方判定。
 		setHeaderRaw(req.Header, "x-client-request-id", uuid.NewString())
+	}
+	// 2.1.273+ 第一方直连默认每请求携带 gateway hint 头（2026-10-05 本机抓包实证；
+	// 自定义 base URL 默认关闭，故沿用 firstParty 门控）。request-class 标识请求类型
+	// （main/subagent/workflow/compaction/auxiliary），网关无法得知子代理分类，
+	// 恒以主循环形态 main 注入；count_tokens 的分类取值未经抓包验证，暂不注入。
+	isMessagesMain := strings.Contains(req.URL.Path, "/v1/messages") && !strings.HasSuffix(req.URL.Path, "/count_tokens")
+	if firstParty && isMessagesMain && getHeaderRaw(req.Header, "x-claude-code-request-class") == "" {
+		setHeaderRaw(req.Header, "x-claude-code-request-class", "main")
 	}
 }
 

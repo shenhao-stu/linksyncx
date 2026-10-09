@@ -277,3 +277,16 @@ func TestClientVersionWorkerStopCancelsFetch(t *testing.T) {
 	worker.Stop()
 	require.Zero(t, repo.writes)
 }
+
+func TestClientVersionOldPinFallsBackWithoutWritesOrSync(t *testing.T) {
+	svc, repo := versionTestService()
+	spec := clientVersionSpecs()[1]
+	repo.values[spec.versionKey] = "2.1.287"
+	repo.values[spec.autoKey] = "false"
+	view := resolveClientVersion(spec, repo.values)
+	require.False(t, view.AutoSync)
+	require.Equal(t, spec.builtin, view.EffectiveVersion)
+	require.Equal(t, spec.builtin, svc.clientVersion(t.Context(), spec.id))
+	require.Equal(t, "2.1.287", repo.values[spec.versionKey])
+	require.Zero(t, repo.writes)
+}

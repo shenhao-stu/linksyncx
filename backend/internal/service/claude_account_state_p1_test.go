@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ type memoryIdentityCache struct {
 	last        map[int64]string
 	lastWrites  int
 	lastErr     error
+	replaces    int
+	migrations  map[string]ClaudeSessionMigration
 }
 
 func newMemoryIdentityCache() *memoryIdentityCache {
@@ -95,6 +98,68 @@ func (m *memoryIdentityCache) GetLastActiveSessionID(_ context.Context, id int64
 	return m.last[id], nil
 }
 
+// ReplaceFingerprint 与 Redis 实现同语义：存储中已是更高代次时不覆盖，返回存储值。
+func (m *memoryIdentityCache) ReplaceFingerprint(_ context.Context, id int64, fp *Fingerprint) (*Fingerprint, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replaces++
+	if existing := m.fingerprint[id]; existing != nil && existing.IdentityEpoch > fp.IdentityEpoch {
+		clone := *existing
+		return &clone, nil
+	}
+	clone := *fp
+	m.fingerprint[id] = &clone
+	stored := clone
+	return &stored, nil
+}
+
+func (m *memoryIdentityCache) OverwriteFingerprint(_ context.Context, id int64, fp *Fingerprint) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	clone := *fp
+	m.fingerprint[id] = &clone
+	return nil
+}
+
+func (m *memoryIdentityCache) DeleteAccountSessions(_ context.Context, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.masked, id)
+	delete(m.ambient, id)
+	delete(m.last, id)
+	return nil
+}
+
+func memoryMigrationKey(id int64, sessionKey string) string {
+	return fmt.Sprintf("%d:%s", id, sessionKey)
+}
+
+func (m *memoryIdentityCache) GetClaudeSessionMigration(_ context.Context, id int64, sessionKey string, _ time.Duration) (*ClaudeSessionMigration, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if migration, ok := m.migrations[memoryMigrationKey(id, sessionKey)]; ok {
+		return &migration, nil
+	}
+	return nil, nil
+}
+
+func (m *memoryIdentityCache) SetClaudeSessionMigration(_ context.Context, id int64, sessionKey string, migration ClaudeSessionMigration, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.migrations == nil {
+		m.migrations = map[string]ClaudeSessionMigration{}
+	}
+	m.migrations[memoryMigrationKey(id, sessionKey)] = migration
+	return nil
+}
+
+func (m *memoryIdentityCache) DeleteClaudeSessionMigration(_ context.Context, id int64, sessionKey string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.migrations, memoryMigrationKey(id, sessionKey))
+	return nil
+}
+
 // readFailsCreateSucceedsCache 模拟 Redis 读抖动但原子创建仍可用：创建脚本返回存储中的已有身份。
 type readFailsCreateSucceedsCache struct {
 	*memoryIdentityCache
@@ -143,12 +208,12 @@ func TestRewriteUserIDPreservesFieldsAndMapsParentSession(t *testing.T) {
 	require.NoError(t, err)
 	got := gjson.GetBytes(out, "metadata.user_id").String()
 	want := `{"ti":"trace","device_id":"` + deviceID + `","account_uuid":"` + accountUUID + `","session_id":"` +
-		upstreamSessionIDFor(7, session) + `","parent_session_id":"` + upstreamSessionIDFor(7, parent) + `","tk":"tok"}`
+		upstreamSessionIDFor(7, 0, session) + `","parent_session_id":"` + upstreamSessionIDFor(7, 0, parent) + `","tk":"tok"}`
 	require.Equal(t, want, got)
 
 	parsed := ParseMetadataUserID(got)
 	require.NotNil(t, parsed)
-	require.Equal(t, upstreamSessionIDFor(7, parent), parsed.ParentSessionID)
+	require.Equal(t, upstreamSessionIDFor(7, 0, parent), parsed.ParentSessionID)
 }
 
 // 单会话模式下账号只有一个会话：parent_session_id 删除，其它字段保留。
@@ -161,7 +226,7 @@ func TestRewriteUserIDWithMaskingDropsParentSession(t *testing.T) {
 		`"parent_session_id":"66666666-7777-4888-8999-000000000000","tk":"tok"}`
 	body := []byte(`{"metadata":{"user_id":` + jsonQuote(uid) + `}}`)
 
-	out, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc", strings.Repeat("ef", 32), p1ClientUA)
+	out, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc", &Fingerprint{ClientID: strings.Repeat("ef", 32), UserAgent: p1ClientUA})
 	require.NoError(t, err)
 	got := gjson.GetBytes(out, "metadata.user_id").String()
 	require.False(t, gjson.Get(got, "parent_session_id").Exists())
@@ -174,7 +239,7 @@ func TestResolveSessionIDWithoutMetadata(t *testing.T) {
 	account := &Account{ID: 9, Platform: PlatformAnthropic, Type: AccountTypeOAuth}
 	resolve := func(svc *IdentityService, account *Account, clientSession string) string {
 		t.Helper()
-		value, err := svc.ResolveSessionIDWithoutMetadata(ctx, account, clientSession)
+		value, err := svc.ResolveSessionIDWithoutMetadata(ctx, account, 0, clientSession)
 		require.NoError(t, err)
 		return value
 	}
@@ -183,7 +248,7 @@ func TestResolveSessionIDWithoutMetadata(t *testing.T) {
 		svc := NewIdentityService(newMemoryIdentityCache())
 		const clientSession = "11111111-2222-4333-8444-555555555555"
 		got := resolve(svc, account, clientSession)
-		require.Equal(t, upstreamSessionIDFor(account.ID, clientSession), got)
+		require.Equal(t, upstreamSessionIDFor(account.ID, 0, clientSession), got)
 
 		// 与同一对话 messages 请求重写后的 session_id 一致。
 		uid := FormatMetadataUserID(strings.Repeat("ab", 32), "", clientSession, "2.1.287")
@@ -273,7 +338,7 @@ func TestCountTokensSessionHeaderFollowsConversation(t *testing.T) {
 	msgReq, _, err := svc.buildUpstreamRequest(ctx, c, account, msgBody, "tok", "oauth", "claude-sonnet-4-5", false, false)
 	require.NoError(t, err)
 	conversationSession := getHeaderRaw(msgReq.Header, "X-Claude-Code-Session-Id")
-	require.Equal(t, upstreamSessionIDFor(account.ID, clientSession), conversationSession)
+	require.Equal(t, upstreamSessionIDFor(account.ID, 0, clientSession), conversationSession)
 
 	ctBody := []byte(`{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`)
 	c.Request.Header.Set("X-Claude-Code-Session-Id", clientSession)

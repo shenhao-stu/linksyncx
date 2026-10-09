@@ -524,7 +524,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	}
 	var ctFingerprint *Fingerprint
 	if account.IsOAuth() && s.identityService != nil && (ctEnableFP || !ctEnableMPT || mimicClaudeCode) {
-		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
+		fp, err := s.identityService.GetOrCreateAccountFingerprint(ctx, account, clientHeaders)
 		if err != nil {
 			return nil, nil, fmt.Errorf("account identity unavailable: %w", err)
 		}
@@ -532,7 +532,7 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		if !ctEnableMPT {
 			accountUUID := account.GetExtraString("account_uuid")
 			if accountUUID != "" && fp.ClientID != "" {
-				newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent)
+				newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -654,7 +654,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// 真实 CLI 的 count_tokens body 不带 metadata：用客户端会话头映射成本账号的会话，
 	// 与该对话 messages 请求一致；都没有时复用账号最近活跃会话或环境会话。
 	if tokenType == "oauth" {
-		sessionID, err := s.claudeUpstreamSessionID(ctx, account, clientHeaders, ctSessionID, !ctEnableFP && ctEnableMPT && !mimicClaudeCode)
+		var identityEpoch int64
+		if ctFingerprint != nil {
+			identityEpoch = ctFingerprint.IdentityEpoch
+		}
+		sessionID, err := s.claudeUpstreamSessionID(ctx, account, identityEpoch, clientHeaders, ctSessionID, !ctEnableFP && ctEnableMPT && !mimicClaudeCode)
 		if err != nil {
 			return nil, nil, err
 		}

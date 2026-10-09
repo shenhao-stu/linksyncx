@@ -17,6 +17,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newIdentityCacheForTest(t *testing.T) (*miniredis.Miniredis, service.IdentityCache) {
+	t.Helper()
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	return server, NewIdentityCache(client)
+}
+
 func TestCRSIdentityConcurrentCreationUsesOnePersistentWinner(t *testing.T) {
 	server := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: server.Addr()})
@@ -244,4 +252,90 @@ func TestIdentityCacheAccountSessionKeys(t *testing.T) {
 	last, err = cache.GetLastActiveSessionID(ctx, 5)
 	require.NoError(t, err)
 	require.Empty(t, last, "the last active session expires with its TTL")
+}
+
+// 迁移水位线：写入带 TTL，读取时续期，删除后读不到。
+func TestIdentityCacheClaudeSessionMigration(t *testing.T) {
+	server, cache := newIdentityCacheForTest(t)
+	ctx := t.Context()
+	key := claudeSessionMigrationKey(5, "conv")
+	require.Equal(t, "claude:session:5:conv:migrated", key)
+
+	got, err := cache.GetClaudeSessionMigration(ctx, 5, "conv", time.Hour)
+	require.NoError(t, err)
+	require.Nil(t, got)
+
+	migration := service.ClaudeSessionMigration{FromAccountID: 3, MessageCount: 12, At: 1_800_000_000}
+	require.NoError(t, cache.SetClaudeSessionMigration(ctx, 5, "conv", migration, time.Hour))
+	server.FastForward(30 * time.Minute)
+	got, err = cache.GetClaudeSessionMigration(ctx, 5, "conv", time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, migration, *got)
+	require.Equal(t, time.Hour, server.TTL(key), "reading the watermark extends it together with the sticky binding")
+
+	require.NoError(t, cache.DeleteClaudeSessionMigration(ctx, 5, "conv"))
+	got, err = cache.GetClaudeSessionMigration(ctx, 5, "conv", time.Hour)
+	require.NoError(t, err)
+	require.Nil(t, got)
+}
+
+// ReplaceFingerprint 能替掉旧 ClientID（轮换后的新身份），但不让旧代次覆盖新代次；
+// OverwriteFingerprint 无条件覆盖；DeleteAccountSessions 清掉伪装、环境与最近活跃三个会话键。
+func TestIdentityCacheReplaceAndDeleteSessions(t *testing.T) {
+	server, cache := newIdentityCacheForTest(t)
+	ctx := t.Context()
+
+	_, err := cache.CreateFingerprint(ctx, 6, &service.Fingerprint{ClientID: "old"})
+	require.NoError(t, err)
+	stored, err := cache.SetFingerprint(ctx, 6, &service.Fingerprint{ClientID: "new"})
+	require.NoError(t, err)
+	require.Equal(t, "old", stored.ClientID, "precondition: SetFingerprint refuses a different identity")
+
+	stored, err = cache.ReplaceFingerprint(ctx, 6, &service.Fingerprint{ClientID: "new", IdentityEpoch: 1, Persisted: true})
+	require.NoError(t, err)
+	require.Equal(t, "new", stored.ClientID)
+	got, err := cache.GetFingerprint(ctx, 6)
+	require.NoError(t, err)
+	require.Equal(t, "new", got.ClientID)
+	require.Equal(t, int64(1), got.IdentityEpoch)
+	require.True(t, got.Persisted)
+	require.Equal(t, fingerprintTTL, server.TTL(fingerprintKey(6)))
+
+	// 慢请求带着轮换前的代次回写：不覆盖，返回存储中的新身份。
+	stored, err = cache.ReplaceFingerprint(ctx, 6, &service.Fingerprint{ClientID: "old", UserAgent: "late", Persisted: true})
+	require.NoError(t, err)
+	require.Equal(t, "new", stored.ClientID)
+	require.Equal(t, int64(1), stored.IdentityEpoch)
+	// 同代次写入（头升级）照常覆盖。
+	stored, err = cache.ReplaceFingerprint(ctx, 6, &service.Fingerprint{ClientID: "new", IdentityEpoch: 1, UserAgent: "upgraded", Persisted: true})
+	require.NoError(t, err)
+	require.Equal(t, "upgraded", stored.UserAgent)
+
+	require.NoError(t, cache.OverwriteFingerprint(ctx, 6, &service.Fingerprint{ClientID: "restored", Persisted: true}))
+	got, err = cache.GetFingerprint(ctx, 6)
+	require.NoError(t, err)
+	require.Equal(t, "restored", got.ClientID, "overwrite ignores the epoch guard")
+	require.Zero(t, got.IdentityEpoch)
+	require.Equal(t, fingerprintTTL, server.TTL(fingerprintKey(6)))
+
+	// 损坏记录视同缺失而被替换。
+	require.NoError(t, server.Set(fingerprintKey(16), `{"IdentityEpoch":9}`))
+	stored, err = cache.ReplaceFingerprint(ctx, 16, &service.Fingerprint{ClientID: "fresh"})
+	require.NoError(t, err)
+	require.Equal(t, "fresh", stored.ClientID)
+	require.NoError(t, server.Set(fingerprintKey(17), "{not json"))
+	stored, err = cache.ReplaceFingerprint(ctx, 17, &service.Fingerprint{ClientID: "fresh"})
+	require.NoError(t, err)
+	require.Equal(t, "fresh", stored.ClientID)
+
+	_, err = cache.GetOrCreateMaskedSessionID(ctx, 6, "masked")
+	require.NoError(t, err)
+	_, err = cache.GetOrCreateAmbientSessionID(ctx, 6, "ambient")
+	require.NoError(t, err)
+	require.NoError(t, cache.SetLastActiveSessionID(ctx, 6, "last"))
+	require.NoError(t, cache.DeleteAccountSessions(ctx, 6))
+	for _, key := range []string{maskedSessionKey(6), ambientSessionKey(6), lastActiveSessionKey(6)} {
+		require.False(t, server.Exists(key), key)
+	}
+	require.True(t, server.Exists(fingerprintKey(6)), "the fingerprint itself is kept")
 }

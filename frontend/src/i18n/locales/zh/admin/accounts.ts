@@ -260,8 +260,10 @@ export default {
           normal: '5h窗口费用正常'
         },
         sessions: {
-          full: '活跃会话已满，新会话需等待（空闲超时：{idle}分钟）',
-          normal: '活跃会话正常（空闲超时：{idle}分钟）'
+          full: '会话名额已满：新对话会调度到其它账号，已绑定的对话不受影响（空闲超时：{idle}分钟）',
+          normal: '活跃会话正常（空闲超时：{idle}分钟）',
+          singleSession: '单会话模式，同一时刻只接一个对话',
+          systemDefault: '使用系统默认会话上限'
         },
         rpm: {
           full: '已达 RPM 上限',
@@ -474,6 +476,10 @@ export default {
         creditsExhausted: '积分已用尽',
         creditsExhaustedUntil: 'AI Credits 已用尽，预计 {time} 恢复',
         overloadedUntil: '负载过重，重置时间：{time}',
+        reauthRequired: '需重新授权',
+        reauthInDays: '{days} 天后需重新授权',
+        reauthInDaysTooltip: '登录凭据（refresh token）将于 {time} 到期，且已确认无法自动续期。到期前请重新授权，否则账号将无法使用',
+        reauthExpiredTooltip: '登录凭据（refresh token）已于 {time} 过期，请重新授权后再使用',
         viewTempUnschedDetails: '查看临时不可调度详情',
         tempUnschedulableUntil: '预计 {time} 恢复',
         clashExitUnavailable: '出口不可用'
@@ -783,6 +789,11 @@ export default {
       createSparkShadowConfirm: '为「{name}」创建链接型 Spark 影子账号?影子共享母账号凭据、仅服务 spark 模型。',
       createSparkShadowSuccess: 'Spark 影子账号已创建',
       createSparkShadowFailed: '创建 Spark 影子账号失败',
+      resetClientIdentity: '重置客户端身份',
+      resetClientIdentityConfirm: '重置「{name}」的客户端身份？账号会换成一台新设备（新的设备 ID 与身份代次），进行中的对话在上游看来会变成新会话。仅在怀疑当前身份已被标记时使用。',
+      resetClientIdentitySuccess: '客户端身份已重置（代次 {epoch}，设备 ID {prefix}…）',
+      resetClientIdentityNone: '该账号还没有客户端身份，首次使用时会自动生成',
+      resetClientIdentityFailed: '重置客户端身份失败',
       duplicateAccount: '复制账号',
       duplicateSuccess: '账号已复制为「{name}」，已暂停调度，请确认凭据后再启用',
       duplicateFailed: '复制账号失败',
@@ -1158,7 +1169,7 @@ export default {
         },
         sessionLimit: {
           label: '会话数量控制',
-          hint: '限制同时活跃的会话数量',
+          hint: '单独设置该账号同时活跃的会话数量；不开启时使用系统设置中的默认会话上限，单会话模式下固定为 1',
           maxSessions: '最大会话数',
           maxSessionsPlaceholder: '3',
           maxSessionsHint: '同时活跃的最大会话数量',
@@ -1194,8 +1205,8 @@ export default {
           randomProfile: '随机'
         },
         sessionIdMasking: {
-          label: '会话 ID 伪装',
-          hint: '启用后将在 15 分钟内固定 metadata.user_id 中的 session ID，使上游认为请求来自同一会话'
+          label: '单会话模式',
+          hint: '开启后该账号的对话共用一个会话 ID（15 分钟滑动），会话上限视为 1：同一时刻只接一个对话，其它新对话调度到别的账号。建议同时开启串行队列'
         },
         cacheTTLOverride: {
           label: '缓存 TTL 强制替换',

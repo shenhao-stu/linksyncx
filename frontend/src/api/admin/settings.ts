@@ -605,6 +605,11 @@ export interface SystemSettings {
 
   // Per-platform account auto-pause thresholds (100 = disabled)
   account_scheduling_thresholds: AccountSchedulingThresholdsMap;
+  // Claude OAuth / setup-token 账号未单独配置 max_sessions 时的会话上限（0 = 不限）
+  claude_default_max_sessions: number;
+  // 已绑定 Claude 对话「额度未耗尽不换号」与自定义规则短时停调的不换号阈值（分钟）
+  claude_sticky_hold_enabled: boolean;
+  claude_sticky_hold_max_wait_minutes: number;
 
   // Identity patch configuration (Claude -> Gemini)
   enable_identity_patch: boolean;
@@ -939,6 +944,9 @@ export interface UpdateSettingsRequest {
   grok_cross_client_model_map_enabled?: boolean;
   grok_default_base_url_mode?: string;
   account_scheduling_thresholds?: AccountSchedulingThresholdsMap;
+  claude_default_max_sessions?: number;
+  claude_sticky_hold_enabled?: boolean;
+  claude_sticky_hold_max_wait_minutes?: number;
   enable_identity_patch?: boolean;
   identity_patch_prompt?: string;
   ops_monitoring_enabled?: boolean;

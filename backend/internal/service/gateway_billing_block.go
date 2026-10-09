@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -86,7 +87,7 @@ func extractFirstUserTextView(view *jsonBodyView) string {
 //
 // 非 Claude Code 请求使用的旧合成模板：
 //
-//	x-anthropic-billing-header: cc_version=2.1.280.{fp}; cc_entrypoint=cli; cch=00000;
+//	x-anthropic-billing-header: cc_version=2.1.290.{fp}; cc_entrypoint=cli; cch=00000; cc_prompt_id={uuid}; cc_turn_origin=cli; cc_prompt_index={n}; cc_turn_index=1;
 //
 // The legacy synthesized template retains a cch placeholder. Its wire value is
 // not verified for current clients; existing client billing blocks are preserved.
@@ -94,9 +95,55 @@ func buildBillingAttributionText(body []byte, cliVersion string) (string, error)
 	if cliVersion == "" {
 		return "", fmt.Errorf("cliVersion required")
 	}
-	fp := computeClaudeCodeFingerprint(body, cliVersion)
+	view := newJSONBodyView(body, nil)
+	fp := computeClaudeCodeFingerprintView(view, cliVersion)
 	return fmt.Sprintf(
-		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=00000;",
-		cliVersion, fp,
+		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=00000; cc_prompt_id=%s; cc_turn_origin=cli; cc_prompt_index=%d; cc_turn_index=1;",
+		cliVersion, fp, uuid.NewString(), countUserPromptIndex(view),
 	), nil
+}
+
+// countUserPromptIndex 近似 cc_prompt_index：非 tool_result 的 user 消息数 - 1。
+func countUserPromptIndex(view *jsonBodyView) int {
+	messages := view.get("messages")
+	if !messages.IsArray() {
+		return 0
+	}
+	count := 0
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+		content := msg.Get("content")
+		// 纯文本 user 消息计入；块形态时首块为 tool_result 的是工具回传，不计入
+		if content.Type == gjson.String {
+			count++
+			return true
+		}
+		if content.IsArray() {
+			if first := content.Get("0.type").String(); first != "" && first != "tool_result" {
+				count++
+			}
+		}
+		return true
+	})
+	if count == 0 {
+		return 0
+	}
+	return count - 1
+}
+
+// extractBillingPromptIDView 从最终请求体的 billing 块中提取 cc_prompt_id 值。
+func extractBillingPromptIDView(view *jsonBodyView) string {
+	text := view.get("system.0.text").String()
+	const marker = "cc_prompt_id="
+	i := strings.Index(text, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := text[i+len(marker):]
+	if j := strings.IndexByte(rest, ';'); j >= 0 {
+		return strings.TrimSpace(rest[:j])
+	}
+	return ""
 }

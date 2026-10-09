@@ -7,10 +7,10 @@ populated from the running release's built-in pins, including any supported
 existing custom/environment override. Click **Save version settings** to persist;
 ordinary settings saves do not overwrite these separately managed choices.
 
-| Client | Built-in pin in upstream 0.2.9.4 | Official stable metadata |
+| Client | Built-in pin in upstream 0.2.9.5 | Official stable metadata |
 | --- | --- | --- |
 | Grok CLI | 1.0.46 | https://x.ai/cli/stable |
-| Claude Code CLI | 2.1.287 | https://api.github.com/repos/anthropics/claude-code/releases/latest |
+| Claude Code CLI | 2.1.293 | https://api.github.com/repos/anthropics/claude-code/releases/latest |
 | Claude TypeScript SDK | 0.127.0 | https://registry.npmjs.org/@anthropic-ai/sdk/latest |
 
 SDK means `@anthropic-ai/sdk`, not the Agent SDK. Its GitHub monorepo's latest
@@ -44,3 +44,9 @@ monotonic, and native passthrough keeps its existing preservation policy. Changi
 these settings does not install a CLI/SDK, change TLS behavior or reconstruct
 telemetry. Independently synchronized latest releases do not establish that a
 particular Claude binary bundles that SDK version.
+
+An upgrade may raise the supported Claude CLI minimum. A saved pin below that
+minimum remains stored, but resolves to the supported built-in version without
+turning on synchronization or fetching release metadata. The version card shows
+the supported effective value. SDK default provenance survives the durable
+identity store and Redis cache loss; records without provenance stay client-owned.

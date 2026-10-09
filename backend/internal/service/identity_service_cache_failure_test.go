@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/stretchr/testify/require"
@@ -36,6 +37,24 @@ func (c *failingIdentityCache) SetLastActiveSessionID(context.Context, int64, st
 func (c *failingIdentityCache) GetLastActiveSessionID(context.Context, int64) (string, error) {
 	return "", c.err
 }
+func (c *failingIdentityCache) ReplaceFingerprint(context.Context, int64, *Fingerprint) (*Fingerprint, error) {
+	return nil, c.err
+}
+func (c *failingIdentityCache) OverwriteFingerprint(context.Context, int64, *Fingerprint) error {
+	return c.err
+}
+func (c *failingIdentityCache) DeleteAccountSessions(context.Context, int64) error {
+	return c.err
+}
+func (c *failingIdentityCache) GetClaudeSessionMigration(context.Context, int64, string, time.Duration) (*ClaudeSessionMigration, error) {
+	return nil, c.err
+}
+func (c *failingIdentityCache) SetClaudeSessionMigration(context.Context, int64, string, ClaudeSessionMigration, time.Duration) error {
+	return c.err
+}
+func (c *failingIdentityCache) DeleteClaudeSessionMigration(context.Context, int64, string) error {
+	return c.err
+}
 
 // Storage failure must not invent an unpersisted identity or silently bypass masking.
 func TestIdentityService_CacheFailurePropagatesWithoutTransientIdentity(t *testing.T) {
@@ -48,7 +67,7 @@ func TestIdentityService_CacheFailurePropagatesWithoutTransientIdentity(t *testi
 	uid := FormatMetadataUserID(strings.Repeat("ab", 32), "acc", "11111111-2222-4333-8444-555555555555", "2.1.280")
 	body, err := sjson.SetBytes([]byte(`{"model":"claude-sonnet-4-5","metadata":{}}`), "metadata.user_id", uid)
 	require.NoError(t, err)
-	out, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc", strings.Repeat("cd", 32), claude.DefaultUserAgent())
+	out, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc", &Fingerprint{ClientID: strings.Repeat("cd", 32), UserAgent: claude.DefaultUserAgent()})
 	require.ErrorContains(t, err, "account session unavailable")
 	require.Nil(t, out)
 }
@@ -59,10 +78,10 @@ func TestIdentityService_EmptyMaskedSessionFailsClosed(t *testing.T) {
 	uid := FormatMetadataUserID(strings.Repeat("ab", 32), "acc", "11111111-2222-4333-8444-555555555555", "2.1.280")
 	body, err := sjson.SetBytes([]byte(`{"metadata":{}}`), "metadata.user_id", uid)
 	require.NoError(t, err)
-	out, err := svc.RewriteUserIDWithMasking(t.Context(), body, account, "acc", strings.Repeat("cd", 32), claude.DefaultUserAgent())
+	out, err := svc.RewriteUserIDWithMasking(t.Context(), body, account, "acc", &Fingerprint{ClientID: strings.Repeat("cd", 32), UserAgent: claude.DefaultUserAgent()})
 	require.ErrorIs(t, err, ErrClientIdentityUnavailable)
 	require.Nil(t, out)
-	sessionID, err := svc.ResolveSessionIDWithoutMetadata(t.Context(), account, "client-session")
+	sessionID, err := svc.ResolveSessionIDWithoutMetadata(t.Context(), account, 0, "client-session")
 	require.ErrorIs(t, err, ErrClientIdentityUnavailable)
 	require.Empty(t, sessionID)
 }
