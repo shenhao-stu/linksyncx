@@ -11,7 +11,7 @@ ordinary settings saves do not overwrite these separately managed choices.
 | --- | --- | --- |
 | Grok CLI | 1.0.46 | https://x.ai/cli/stable |
 | Claude Code CLI | 2.1.293 | https://api.github.com/repos/anthropics/claude-code/releases/latest |
-| Claude TypeScript SDK | 0.127.0 | https://registry.npmjs.org/@anthropic-ai/sdk/latest |
+| Claude TypeScript SDK | 0.128.0 | https://registry.npmjs.org/@anthropic-ai/sdk/latest |
 
 SDK means `@anthropic-ai/sdk`, not the Agent SDK. Its GitHub monorepo's latest
 release may refer to another package. Package-name validation prevents that
@@ -45,7 +45,7 @@ these settings does not install a CLI/SDK, change TLS behavior or reconstruct
 telemetry. Independently synchronized latest releases do not establish that a
 particular Claude binary bundles that SDK version.
 
-An upgrade may raise the supported Claude CLI minimum. A saved pin below that
+An upgrade may raise the supported Claude CLI or SDK minimum. A saved pin below that
 minimum remains stored, but resolves to the supported built-in version without
 turning on synchronization or fetching release metadata. The version card shows
 the supported effective value. SDK default provenance survives the durable
