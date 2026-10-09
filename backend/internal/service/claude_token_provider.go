@@ -9,7 +9,10 @@ import (
 )
 
 const (
-	claudeTokenRefreshSkew = 3 * time.Minute
+	// claudeTokenRefreshSkew 对齐真实 Claude Code 2.1.287：距过期不足 5 分钟时在请求
+	// 路径上刷新（pF: now+300000 >= expiresAt）。与 claudeTokenCacheSkew 相等，缓存
+	// 在过期前 5 分钟失效后的第一个请求即触发刷新，不会把将过期的令牌重新放回缓存。
+	claudeTokenRefreshSkew = 5 * time.Minute
 	claudeTokenCacheSkew   = 5 * time.Minute
 	claudeLockWaitTime     = 200 * time.Millisecond
 )
@@ -17,7 +20,8 @@ const (
 // ClaudeTokenCache token cache interface.
 type ClaudeTokenCache = GeminiTokenCache
 
-// ClaudeTokenProvider manages access_token for Claude OAuth and Vertex service account accounts.
+// ClaudeTokenProvider manages access_token for Claude OAuth, setup-token (with a refresh token)
+// and Vertex service account accounts.
 type ClaudeTokenProvider struct {
 	accountRepo   AccountRepository
 	tokenCache    ClaudeTokenCache
@@ -56,11 +60,21 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	if account == nil {
 		return "", errors.New("account is nil")
 	}
-	if account.Platform != PlatformAnthropic || (account.Type != AccountTypeOAuth && account.Type != AccountTypeServiceAccount) {
+	if account.Platform != PlatformAnthropic || (account.Type != AccountTypeOAuth && account.Type != AccountTypeServiceAccount && account.Type != AccountTypeSetupToken) {
 		return "", errors.New("not an anthropic oauth or service account")
 	}
 	if account.Type == AccountTypeServiceAccount {
 		return p.getServiceAccountAccessToken(ctx, account)
+	}
+	// setup-token 通常是一年期 access token、没有 refresh token，直接用凭据里的值。
+	// 带 refresh token 的老 setup-token 账号与 OAuth 一样在请求路径上按需刷新：
+	// 后台刷新只覆盖活跃账号（D7），不能再指望它让闲置账号的 token 保持有效。
+	if account.Type == AccountTypeSetupToken && !ClaudeSetupTokenRefreshable(account) {
+		accessToken := account.GetCredential("access_token")
+		if strings.TrimSpace(accessToken) == "" {
+			return "", errors.New("access_token not found in credentials")
+		}
+		return accessToken, nil
 	}
 
 	cacheKey := ClaudeTokenCacheKey(account)
@@ -159,6 +173,12 @@ func (p *ClaudeTokenProvider) GetAccessToken(ctx context.Context, account *Accou
 	}
 
 	return accessToken, nil
+}
+
+// ClaudeSetupTokenRefreshable 报告 setup-token 账号是否带 refresh token、可以按需刷新。
+func ClaudeSetupTokenRefreshable(account *Account) bool {
+	return account != nil && account.Type == AccountTypeSetupToken &&
+		strings.TrimSpace(account.GetCredential("refresh_token")) != ""
 }
 
 func (p *ClaudeTokenProvider) getServiceAccountAccessToken(ctx context.Context, account *Account) (string, error) {

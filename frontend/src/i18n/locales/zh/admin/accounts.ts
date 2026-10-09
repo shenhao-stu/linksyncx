@@ -4,16 +4,17 @@ export default {
       description: '管理 AI 平台账号和 Cookie',
       targetGroup: {
         title: '选择目标分组',
-        description: '账号必须归属分组。先选择要放入的分组，再填写账号信息。',
+        description: '选择要放入的分组（平台由分组决定）；分组是可选的，也可以不指定分组，稍后再分配。',
         channelTab: '渠道分组',
         managedTab: '管理分组',
         search: '搜索分组名称',
         emptyChannel: '还没有渠道分组',
         emptyManaged: '还没有管理分组',
-        emptyHint: '先创建分组，再回来添加账号。',
+        emptyHint: '可以新建分组，也可以不指定分组直接添加账号。',
         noMatch: '没有匹配的分组',
         createGroup: '新建分组',
         next: '下一步',
+        skip: '不指定分组',
         accountsCount: '{count} 个账号',
         inactive: '已停用',
         selected: '目标分组',
@@ -21,19 +22,14 @@ export default {
         platformLocked: '平台由目标分组「{name}」决定',
         managedLocked: '管理分组的账号只能属于该分组',
       },
-      groupRequired: '请至少选择一个分组',
       managedGroupExclusive: '管理分组的账号只能属于该分组，不能同时选择其他分组',
       managedGroupHint: '选择管理分组时，它必须是唯一的分组',
-      ungroupedBanner: '有 {count} 个账号尚未归属任何分组。账号现在必须属于分组，建议尽快为它们指定分组。',
-      ungroupedView: '查看这些账号',
       importTargetGroups: '目标分组',
-      importTargetGroupsHint: '每个账号只会绑定与其平台相同的目标分组；没有选择对应平台分组的账号不会被导入。',
-      importTargetGroupsRequired: '请选择导入的目标分组',
-      importTargetGroupsMissing: '以下平台还没有选择目标分组：{platforms}',
+      importTargetGroupsHint: '可选。每个账号只会绑定与其平台相同的目标分组；没有对应平台分组的账号导入为未分组账号。',
       targetPlatformCovered: '已选分组',
-      targetPlatformMissing: '未选分组',
+      targetPlatformMissing: '不分组',
       crsTargetGroups: '新账号目标分组',
-      crsTargetGroupsHint: '新账号只会绑定与其平台相同的目标分组；已存在的账号只更新，不改变分组。',
+      crsTargetGroupsHint: '可选。新账号只会绑定与其平台相同的目标分组，没有对应平台分组时不分组；已存在的账号只更新，不改变分组。',
       createAccount: '添加账号',
       autoRefresh: '自动刷新',
       enableAutoRefresh: '启用自动刷新',
@@ -264,8 +260,10 @@ export default {
           normal: '5h窗口费用正常'
         },
         sessions: {
-          full: '活跃会话已满，新会话需等待（空闲超时：{idle}分钟）',
-          normal: '活跃会话正常（空闲超时：{idle}分钟）'
+          full: '会话名额已满：新对话会调度到其它账号，已绑定的对话不受影响（空闲超时：{idle}分钟）',
+          normal: '活跃会话正常（空闲超时：{idle}分钟）',
+          singleSession: '单会话模式，同一时刻只接一个对话',
+          systemDefault: '使用系统默认会话上限'
         },
         rpm: {
           full: '已达 RPM 上限',
@@ -478,6 +476,10 @@ export default {
         creditsExhausted: '积分已用尽',
         creditsExhaustedUntil: 'AI Credits 已用尽，预计 {time} 恢复',
         overloadedUntil: '负载过重，重置时间：{time}',
+        reauthRequired: '需重新授权',
+        reauthInDays: '{days} 天后需重新授权',
+        reauthInDaysTooltip: '登录凭据（refresh token）将于 {time} 到期，且已确认无法自动续期。到期前请重新授权，否则账号将无法使用',
+        reauthExpiredTooltip: '登录凭据（refresh token）已于 {time} 过期，请重新授权后再使用',
         viewTempUnschedDetails: '查看临时不可调度详情',
         tempUnschedulableUntil: '预计 {time} 恢复',
         clashExitUnavailable: '出口不可用'
@@ -651,6 +653,19 @@ export default {
         weeklyTitle: '每周一次的 5 小时会话重置（部分 Max 账号的灰度功能），只能在 5 小时额度用尽时使用',
         ineligible: '无重置资格',
         ineligibleTitle: '上游原因：{reason}',
+        ineligibleReasons: {
+          config_off: '上游未开放此功能',
+          tier: '当前套餐不支持',
+          seat: '团队席位不支持',
+          mobile: '移动端订阅不支持',
+          surface: '客户端类型不符',
+          cli_version: 'Claude Code 版本过低',
+          no_grant: '账号未获发重置卡',
+          tenure: '订阅时长不足',
+          other_experiment: '账号参与了其他实验',
+          unavailable: '上游暂时无法判定',
+          unknown: '未知原因'
+        },
         limits: {
           five_hour: '5 小时',
           seven_day: '每周',
@@ -774,6 +789,11 @@ export default {
       createSparkShadowConfirm: '为「{name}」创建链接型 Spark 影子账号?影子共享母账号凭据、仅服务 spark 模型。',
       createSparkShadowSuccess: 'Spark 影子账号已创建',
       createSparkShadowFailed: '创建 Spark 影子账号失败',
+      resetClientIdentity: '重置客户端身份',
+      resetClientIdentityConfirm: '重置「{name}」的客户端身份？账号会换成一台新设备（新的设备 ID 与身份代次），进行中的对话在上游看来会变成新会话。仅在怀疑当前身份已被标记时使用。',
+      resetClientIdentitySuccess: '客户端身份已重置（代次 {epoch}，设备 ID {prefix}…）',
+      resetClientIdentityNone: '该账号还没有客户端身份，首次使用时会自动生成',
+      resetClientIdentityFailed: '重置客户端身份失败',
       duplicateAccount: '复制账号',
       duplicateSuccess: '账号已复制为「{name}」，已暂停调度，请确认凭据后再启用',
       duplicateFailed: '复制账号失败',
@@ -959,8 +979,8 @@ export default {
         searchTestHint:
           '独立网页搜索探测（与网关 /v1/web_search 语义一致），不是带 tools 的自由对话。',
         ttsTextLabel: 'TTS 文本',
-        ttsTextPlaceholder: '例如：Hello from Sub2API connectivity test.',
-        ttsTextDefault: 'Hello from Sub2API account connectivity test.',
+        ttsTextPlaceholder: '例如：你好，这是一段简短的语音测试。',
+        ttsTextDefault: 'Hello, this is a quick audio test.',
         ttsTestHint: '独立调用 /v1/tts（language=en）；成功时显示音频字节数。',
         sttTestHint: '独立调用 /v1/stt，使用合成静音 WAV；成功表示接口可达。',
         realtimeTestHint:
@@ -1149,7 +1169,7 @@ export default {
         },
         sessionLimit: {
           label: '会话数量控制',
-          hint: '限制同时活跃的会话数量',
+          hint: '单独设置该账号同时活跃的会话数量；不开启时使用系统设置中的默认会话上限，单会话模式下固定为 1',
           maxSessions: '最大会话数',
           maxSessionsPlaceholder: '3',
           maxSessionsHint: '同时活跃的最大会话数量',
@@ -1185,8 +1205,8 @@ export default {
           randomProfile: '随机'
         },
         sessionIdMasking: {
-          label: '会话 ID 伪装',
-          hint: '启用后将在 15 分钟内固定 metadata.user_id 中的 session ID，使上游认为请求来自同一会话'
+          label: '单会话模式',
+          hint: '开启后该账号的对话共用一个会话 ID（15 分钟滑动），会话上限视为 1：同一时刻只接一个对话，其它新对话调度到别的账号。建议同时开启串行队列'
         },
         cacheTTLOverride: {
           label: '缓存 TTL 强制替换',

@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -17,6 +18,10 @@ const requestIDHeader = "X-Request-ID"
 func RequestLogger() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c.Request == nil {
+			c.Next()
+			return
+		}
+		if claude.IsDiscardedTelemetryRequest(c.Request.Method, c.Request.URL.Path) {
 			c.Next()
 			return
 		}

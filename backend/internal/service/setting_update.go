@@ -38,6 +38,8 @@ func (s *SettingService) UpdateSettings(ctx context.Context, settings *SystemSet
 // UpdateSettingsOmitting persists system settings, leaving the keys in omitted
 // at their stored value.
 func (s *SettingService) UpdateSettingsOmitting(ctx context.Context, settings *SystemSettings, omitted OmittedSettingKeys) error {
+	s.clientVersionMu.Lock()
+	defer s.clientVersionMu.Unlock()
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -60,6 +62,8 @@ func (s *SettingService) UpdateSettingsWithAuthSourceDefaults(ctx context.Contex
 // auth-source defaults in a single write, leaving the keys in omitted at their
 // stored value.
 func (s *SettingService) UpdateSettingsWithAuthSourceDefaultsOmitting(ctx context.Context, settings *SystemSettings, authDefaults *AuthSourceDefaultSettings, omitted OmittedSettingKeys) error {
+	s.clientVersionMu.Lock()
+	defer s.clientVersionMu.Unlock()
 	updates, err := s.buildSystemSettingsUpdates(ctx, settings)
 	if err != nil {
 		return err
@@ -552,6 +556,18 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 		}
 		updates[SettingKeyAccountSchedulingThresholds] = string(blob)
 	}
+	if err := validateClaudeDefaultMaxSessions(settings.ClaudeDefaultMaxSessions); err != nil {
+		return nil, err
+	}
+	updates[SettingKeyClaudeDefaultMaxSessions] = strconv.Itoa(settings.ClaudeDefaultMaxSessions)
+	if settings.ClaudeStickyHoldMaxWaitMinutes == 0 {
+		settings.ClaudeStickyHoldMaxWaitMinutes = DefaultClaudeStickyHoldMaxWaitMinutes
+	}
+	if err := validateClaudeStickyHoldMaxWaitMinutes(settings.ClaudeStickyHoldMaxWaitMinutes); err != nil {
+		return nil, err
+	}
+	updates[SettingKeyClaudeStickyHoldEnabled] = strconv.FormatBool(settings.ClaudeStickyHoldEnabled)
+	updates[SettingKeyClaudeStickyHoldMaxWaitMinutes] = strconv.Itoa(settings.ClaudeStickyHoldMaxWaitMinutes)
 
 	updates[SettingKeyAllowUserViewErrorRequests] = strconv.FormatBool(settings.AllowUserViewErrorRequests)
 
@@ -794,6 +810,13 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 		// Partial/omitted payload: clear cache so the next hot-path read reloads from DB.
 		accountSchedulingThresholdsCache.Store(&cachedAccountSchedulingThresholds{})
 	}
+	s.claudeDefaultMaxSessionsSF.Forget(SettingKeyClaudeDefaultMaxSessions)
+	s.storeClaudeDefaultMaxSessions(settings.ClaudeDefaultMaxSessions, claudeDefaultMaxSessionsCacheTTL)
+	s.claudeStickyHoldSF.Forget(SettingKeyClaudeStickyHoldEnabled)
+	s.storeClaudeStickyHoldSettings(ClaudeStickyHoldSettings{
+		Enabled: settings.ClaudeStickyHoldEnabled,
+		MaxWait: time.Duration(settings.ClaudeStickyHoldMaxWaitMinutes) * time.Minute,
+	}, claudeStickyHoldSettingsCacheTTL)
 	if s.cfg != nil {
 		s.cfg.SetForwardedClientIPSettings(settings.APIKeyACLTrustForwardedIP, settings.ForwardedClientIPHeaders)
 	}

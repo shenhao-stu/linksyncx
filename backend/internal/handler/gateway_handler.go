@@ -275,7 +275,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 
 	// [DEBUG-STICKY] 打印会话 hash 生成结果
-	reqLog.Info("sticky.session_hash_generated",
+	reqLog.Debug("sticky.session_hash_generated",
 		zap.String("session_hash", sessionHash),
 		zap.String("metadata_user_id_raw", parsedReq.MetadataUserID),
 	)
@@ -299,7 +299,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	if sessionKey != "" {
 		sessionBoundAccountID, _ = h.gatewayService.GetCachedSessionAccountID(c.Request.Context(), apiKey.GroupID, sessionKey)
 		// [DEBUG-STICKY] 打印粘性会话查询结果
-		reqLog.Info("sticky.cache_lookup",
+		reqLog.Debug("sticky.cache_lookup",
 			zap.String("session_key", sessionKey),
 			zap.Int64("bound_account_id", sessionBoundAccountID),
 		)
@@ -312,7 +312,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			c.Request = c.Request.WithContext(ctx)
 		}
 	} else {
-		reqLog.Info("sticky.no_session_key", zap.String("session_hash", sessionHash))
+		reqLog.Debug("sticky.no_session_key", zap.String("session_hash", sessionHash))
 	}
 	// 判断是否真的绑定了粘性会话：有 sessionKey 且已经绑定到某个账号
 	hasBoundSession := sessionKey != "" && sessionBoundAccountID > 0
@@ -640,6 +640,9 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		}
 	}()
 
+	// 额度未耗尽不换号（D9）：本入口能处理 ClaudeStickyHoldError，并按 Anthropic 协议返回可重试错误。
+	c.Request = c.Request.WithContext(service.WithClaudeStickyHold(c.Request.Context()))
+
 	for {
 		fs := NewFailoverState(h.maxAccountSwitches, hasBoundSession)
 		retryWithFallback := false
@@ -652,7 +655,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 
 			// 选择支持该模型的账号
-			reqLog.Info("sticky.selecting_account",
+			reqLog.Debug("sticky.selecting_account",
 				zap.String("session_key", sessionKey),
 				zap.Int64("sticky_bound_account_id", sessionBoundAccountID),
 				zap.Bool("has_bound_session", hasBoundSession),
@@ -660,6 +663,15 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			)
 			selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, parsedReq.MetadataUserID, subject.UserID)
 			if err != nil {
+				if holdErr, ok := service.AsClaudeStickyHoldError(err); ok {
+					reqLog.Info("gateway.sticky_hold_retry_later",
+						zap.Int64("account_id", holdErr.AccountID),
+						zap.String("reason", holdErr.Reason),
+						zap.Duration("retry_after", holdErr.RetryAfter),
+					)
+					h.writeClaudeStickyHoldError(c, holdErr, streamStarted)
+					return
+				}
 				if len(fs.FailedAccountIDs) == 0 {
 					cls := classifyNoAccountErrorFromGin(c, h.gatewayService, currentAPIKey, reqModel, reqModel, platform)
 					if !cls.ModelNotFound {
@@ -702,7 +714,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
 			// [DEBUG-STICKY] 打印账号选择结果
-			reqLog.Info("sticky.account_selected",
+			reqLog.Debug("sticky.account_selected",
 				zap.Int64("selected_account_id", account.ID),
 				zap.String("account_name", account.Name),
 				zap.Bool("slot_acquired", selection.Acquired),
@@ -818,10 +830,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 			switch umqMode {
 			case config.UMQModeSerialize:
-				// 串行模式：获取锁 + RPM 延迟 + 释放（当前行为不变）
+				// 串行模式：获取锁 + RPM 延迟 + 释放。锁按会话（D8），单会话模式等同账号级
 				baseRPM := account.GetBaseRPM()
+				umqScope := h.userMsgQueueHelper.queueService.ScopeFor(account, attemptParsedReq, c.Request.Header)
 				release, qErr := h.userMsgQueueHelper.AcquireWithWait(
-					c, account.ID, baseRPM, reqStream, &streamStarted,
+					c, umqScope, baseRPM, reqStream, &streamStarted,
 					h.cfg.Gateway.UserMessageQueue.WaitTimeout(),
 					reqLog,
 				)
@@ -876,6 +889,13 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if err := attemptParsedReq.ReplaceBody(h.gatewayService.ApplyBedrockCCCompat(c, attemptParsedReq.Body.Bytes(), attemptParsedReq.Model, account, apiKey.GroupID)); err != nil {
 				h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 				return
+			}
+			// 换号后按新会话处理（D10）：剥离旧账号签发的 thinking 签名。
+			if prepared, changed := h.gatewayService.PrepareClaudeSessionBody(c.Request.Context(), account, sessionKey, sessionBoundAccountID, attemptParsedReq.Body.Bytes()); changed {
+				if err := attemptParsedReq.ReplaceBody(prepared); err != nil {
+					h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
+					return
+				}
 			}
 			attemptBody := attemptParsedReq.Body.Bytes()
 
@@ -1034,6 +1054,27 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					if c.Writer.Size() != writerSizeBeforeForward {
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
+					}
+					// 已绑定对话的软性上游错误：不换号，在原账号上退避重试，用尽后交给客户端重试（D9）。
+					if sessionBoundAccountID == account.ID && service.IsClaudeStickySoftFailure(failoverErr) &&
+						h.gatewayService.ClaudeStickyHoldApplies(c.Request.Context(), account) {
+						switch fs.HandleClaudeStickyHoldFailure(c.Request.Context(), account.ID, failoverErr, service.ClaudeStickySameAccountRetries()) {
+						case FailoverContinue:
+							h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+							delete(sessionSlotAccounts, account.ID)
+							continue
+						case FailoverCanceled:
+							failoverClientGone(c)
+							return
+						default:
+							service.SetOpsUpstreamError(c, failoverErr.StatusCode, service.ExtractUpstreamErrorMessage(failoverErr.ResponseBody), "")
+							h.writeClaudeStickyHoldError(c, &service.ClaudeStickyHoldError{
+								AccountID:  account.ID,
+								Reason:     "upstream_" + strconv.Itoa(failoverErr.StatusCode),
+								RetryAfter: service.ClaudeStickyUpstreamRetryAfter(failoverErr),
+							}, streamStarted)
+							return
+						}
 					}
 					action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
 					switch action {
@@ -1901,6 +1942,19 @@ func (h *GatewayHandler) handleFailoverExhausted(c *gin.Context, failoverErr *se
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
 }
+
+// writeClaudeStickyHoldError 已绑定对话的原账号暂时不能服务（软性原因）：不换号，返回与上游过载相同的
+// 可重试错误——529 overloaded_error，带 x-should-retry 与 retry-after，Claude Code / Anthropic SDK 会自行退避重试。
+func (h *GatewayHandler) writeClaudeStickyHoldError(c *gin.Context, holdErr *service.ClaudeStickyHoldError, streamStarted bool) {
+	if !streamStarted {
+		c.Header("x-should-retry", "true")
+		c.Header("retry-after", strconv.Itoa(holdErr.RetryAfterSeconds()))
+	}
+	h.handleStreamingAwareError(c, statusAnthropicOverloaded, "overloaded_error", "Overloaded", streamStarted)
+}
+
+// statusAnthropicOverloaded 是 Anthropic 上游过载时的 HTTP 状态码。
+const statusAnthropicOverloaded = 529
 
 // handleFailoverExhaustedSimple 简化版本，用于没有响应体的情况
 func (h *GatewayHandler) handleFailoverExhaustedSimple(c *gin.Context, statusCode int, streamStarted bool) {

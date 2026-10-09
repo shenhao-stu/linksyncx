@@ -139,9 +139,13 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			stickySource = "cache"
 		}
 	}
+	// 会话预算只约束新对话：回到粘性绑定账号的对话放行并重新登记（见 checkAndRegisterSession）。
+	registerSession := func(account *Account) bool {
+		return s.checkAndRegisterSession(ctx, account, sessionHash, stickyAccountID > 0 && account.ID == stickyAccountID)
+	}
 
 	// [DEBUG-STICKY] 调度器入口日志
-	slog.Info("sticky.scheduler_entry",
+	slog.Debug("sticky.scheduler_entry",
 		"group_id", derefGroupID(groupID),
 		"session_hash", shortSessionHash(sessionHash),
 		"sticky_account_id", stickyAccountID,
@@ -177,7 +181,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			result, err := s.tryAcquireAccountSlot(ctx, account.ID, account.Concurrency)
 			if err == nil && result.Acquired {
 				// 获取槽位后检查会话限制（使用 sessionHash 作为会话标识符）
-				if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+				if !registerSession(account) {
 					result.ReleaseFunc()                   // 释放槽位
 					localExcluded[account.ID] = struct{}{} // 排除此账号
 					continue                               // 重新选择
@@ -186,7 +190,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			// 对于等待计划的情况，也需要先检查会话限制
-			if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+			if !registerSession(account) {
 				localExcluded[account.ID] = struct{}{}
 				continue
 			}
@@ -270,6 +274,25 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				}
 				logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] context group routing miss: group_id=%d model=%s patterns(sample)=%v", group.ID, requestedModel, keys)
 			}
+		}
+	}
+
+	// ============ Layer 0.5: 已绑定 Claude 对话额度未耗尽不换号（D9） ============
+	// 只有硬性原因（额度耗尽、账号失效、模型不支持、管理员策略）才交回下面的流程换号；软性原因继续
+	// 使用原账号或返回 ClaudeStickyHoldError 让客户端稍后重试。
+	if stickyAccountID > 0 && !isExcluded(stickyAccountID) {
+		if selection, holdErr, handled := s.selectBoundClaudeAccount(ctx, stickyAccountID, accountByID[stickyAccountID], stickyHoldEnv{
+			groupID:             groupID,
+			sessionHash:         sessionHash,
+			requestedModel:      requestedModel,
+			platform:            platform,
+			useMixed:            useMixed,
+			routingAccountIDs:   routingAccountIDs,
+			isChannelRestricted: isChannelRestricted,
+			registerSession:     registerSession,
+			cfg:                 stickyHoldSchedulingConfig{maxWaiting: cfg.StickySessionMaxWaiting, waitTimeout: cfg.StickySessionWaitTimeout},
+		}); handled {
+			return selection, holdErr
 		}
 	}
 
@@ -369,7 +392,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 							result, err := s.tryAcquireAccountSlot(ctx, stickyAccountID, stickyAccount.Concurrency)
 							if err == nil && result.Acquired {
 								// 会话数量限制检查
-								if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+								if !registerSession(stickyAccount) {
 									result.ReleaseFunc() // 释放槽位
 									stickyCacheMissReason = "session_limit"
 									// 继续到负载感知选择
@@ -390,7 +413,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 								waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, stickyAccountID)
 								if waitingCount < cfg.StickySessionMaxWaiting {
 									// 会话数量限制检查（等待计划也需要占用会话配额）
-									if !s.checkAndRegisterSession(ctx, stickyAccount, sessionHash) {
+									if !registerSession(stickyAccount) {
 										stickyCacheMissReason = "session_limit"
 										// 会话限制已满，继续到负载感知选择
 									} else {
@@ -456,11 +479,15 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 
 			if len(routingAvailable) > 0 {
-				// 排序：优先级 > 负载率 > 最后使用时间
+				// 排序：优先级 > 限流快照无压力 > 负载率 > 最后使用时间
+				now := time.Now()
 				sort.SliceStable(routingAvailable, func(i, j int) bool {
 					a, b := routingAvailable[i], routingAvailable[j]
 					if a.account.Priority != b.account.Priority {
 						return a.account.Priority < b.account.Priority
+					}
+					if pa, pb := claudeRateLimitUnderPressure(a.account, now), claudeRateLimitUnderPressure(b.account, now); pa != pb {
+						return !pa
 					}
 					if a.loadInfo.LoadRate != b.loadInfo.LoadRate {
 						return a.loadInfo.LoadRate < b.loadInfo.LoadRate
@@ -483,7 +510,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					result, err := s.tryAcquireAccountSlot(ctx, item.account.ID, item.account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
-						if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
+						if !registerSession(item.account) {
 							result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 							continue
 						}
@@ -500,7 +527,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 				// 5. 所有路由账号槽位满，尝试返回等待计划（选择负载最低的）
 				// 遍历找到第一个满足会话限制的账号
 				for _, item := range routingAvailable {
-					if !s.checkAndRegisterSession(ctx, item.account, sessionHash) {
+					if !registerSession(item.account) {
 						continue // 会话限制已满，尝试下一个
 					}
 					if s.debugModelRoutingEnabled() {
@@ -569,7 +596,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 					if err == nil && result.Acquired {
 						// 会话数量限制检查
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+						if !registerSession(account) {
 							result.ReleaseFunc() // 释放槽位，继续到 Layer 2
 							slog.Debug("sticky.layer1_5_no_routing_miss",
 								"account_id", accountID,
@@ -597,7 +624,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 					waitingCount, _ := s.concurrencyService.GetAccountWaitingCount(ctx, accountID)
 					if waitingCount < cfg.StickySessionMaxWaiting {
 						// 会话数量限制检查（等待计划也需要占用会话配额）
-						if !s.checkAndRegisterSession(ctx, account, sessionHash) {
+						if !registerSession(account) {
 							// 会话限制已满，继续到 Layer 2
 						} else {
 							slog.Debug("sticky.layer1_5_no_routing_hit",
@@ -715,7 +742,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
 	if err != nil {
-		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); legacyErr != nil {
+		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth, registerSession); legacyErr != nil {
 			return nil, legacyErr
 		} else if ok {
 			return result, nil
@@ -735,10 +762,13 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			}
 		}
 
-		// 分层过滤选择：优先级 →（可选）最早重置 → 负载率 → LRU
+		// 分层过滤选择：优先级 → 限流快照无压力 →（可选）最早重置 → 负载率 → LRU
+		now := time.Now()
 		for len(available) > 0 {
 			// 1. 取优先级最小的集合
 			candidates := filterByMinPriority(available)
+			// 1.5 同优先级里优先没有预警 / 宽限区 / 低优先级通道信号的账号（只影响新对话选号）
+			candidates = filterByClaudeRateLimitHealth(candidates, now)
 			// 2. （可选）use-it-or-lose-it：优先选用会话窗口最早重置的账号
 			if cfg.PreferSoonestReset {
 				candidates = filterBySoonestReset(candidates)
@@ -754,7 +784,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			result, err := s.tryAcquireAccountSlot(ctx, selected.account.ID, selected.account.Concurrency)
 			if err == nil && result.Acquired {
 				// 会话数量限制检查
-				if !s.checkAndRegisterSession(ctx, selected.account, sessionHash) {
+				if !registerSession(selected.account) {
 					result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				} else {
 					if sessionHash != "" && s.cache != nil {
@@ -780,7 +810,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
-		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+		if !registerSession(acc) {
 			continue // 会话限制已满，尝试下一个账号
 		}
 		return s.newSelectionResult(ctx, acc, false, nil, &AccountWaitPlan{
@@ -793,7 +823,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	return nil, ErrNoAvailableAccounts
 }
 
-func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
+func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool, registerSession func(*Account) bool) (*AccountSelectionResult, bool, error) {
 	ordered := append([]*Account(nil), candidates...)
 	sortAccountsByPriorityAndLastUsed(ordered, preferOAuth)
 
@@ -801,7 +831,7 @@ func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates
 		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
 		if err == nil && result.Acquired {
 			// 会话数量限制检查
-			if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+			if !registerSession(acc) {
 				result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
 				continue
 			}
@@ -1126,6 +1156,11 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 // 用于 Handler 层在首次请求时提前设置 SingleAccountRetry context，
 // 避免单账号分组收到 503 时错误地设置模型限流标记导致后续请求连续快速失败。
 func (s *GatewayService) IsSingleAntigravityAccountGroup(ctx context.Context, groupID *int64) bool {
+	// 每个请求都会走到这里，而多数分组根本没有 antigravity 账号：空桶在快照缓存里
+	// 视同未命中、每次都会回源 DB，先用快照服务记住的"确认为空"短路。
+	if s.schedulerSnapshot != nil && s.schedulerSnapshot.KnownEmptyBucket(groupID, PlatformAntigravity, true) {
+		return false
+	}
 	accounts, _, err := s.listSchedulableAccounts(ctx, groupID, PlatformAntigravity, true)
 	if err != nil {
 		return false
@@ -1461,25 +1496,28 @@ func (s *GatewayService) IncrementAccountRPM(ctx context.Context, accountID int6
 }
 
 // checkAndRegisterSession 检查并注册会话，用于会话数量限制
-// 仅适用于 Anthropic OAuth/SetupToken 账号
+// 仅适用于 Anthropic OAuth/SetupToken 账号，预算见 ClaudeSessionBudget（未单独配置时用系统默认值）
 // sessionID: 会话标识符（使用粘性会话的 hash）
-// 返回 true 表示允许（在限制内或会话已存在），false 表示拒绝（超出限制且是新会话）
-func (s *GatewayService) checkAndRegisterSession(ctx context.Context, account *Account, sessionID string) bool {
-	// 只检查 Anthropic OAuth/SetupToken 账号
-	if !account.IsAnthropicOAuthOrSetupToken() {
-		return true
+// bound: 对话已粘性绑定到该账号。预算只约束新对话：已绑定对话总是放行并重新登记，
+// 即使名额已因空闲超时被回收、此刻已满（账号可短暂超出预算），避免额度未耗尽就换号。
+// 返回 true 表示允许（在限制内、会话已存在或已绑定），false 表示拒绝（超出限制且是新对话）
+func (s *GatewayService) checkAndRegisterSession(ctx context.Context, account *Account, sessionID string, bound bool) bool {
+	if sessionID == "" || s.sessionLimitCache == nil {
+		return true // 无会话ID或缓存不可用时允许通过
 	}
-
-	maxSessions := account.GetMaxSessions()
-	if maxSessions <= 0 || sessionID == "" {
-		return true // 未启用会话限制或无会话ID
-	}
-
-	if s.sessionLimitCache == nil {
-		return true // 缓存不可用时允许通过
+	maxSessions := s.claudeSessionBudget(ctx, account)
+	if maxSessions <= 0 {
+		return true // 非 Claude OAuth/SetupToken 账号或未启用会话限制
 	}
 
 	idleTimeout := time.Duration(account.GetSessionIdleTimeoutMinutes()) * time.Minute
+
+	if bound {
+		if err := s.sessionLimitCache.RegisterBoundSession(ctx, account.ID, sessionID, idleTimeout); err != nil {
+			slog.Debug("session_limit.register_bound_failed", "account_id", account.ID, "error", err)
+		}
+		return true
+	}
 
 	allowed, err := s.sessionLimitCache.RegisterSession(ctx, account.ID, sessionID, maxSessions, idleTimeout)
 	if err != nil {
@@ -1498,10 +1536,7 @@ func (s *GatewayService) ReleaseAccountSession(ctx context.Context, account *Acc
 	if s == nil || s.sessionLimitCache == nil || account == nil || sessionID == "" {
 		return
 	}
-	if !account.IsAnthropicOAuthOrSetupToken() {
-		return
-	}
-	if account.GetMaxSessions() <= 0 {
+	if s.claudeSessionBudget(ctx, account) <= 0 {
 		return
 	}
 	if err := s.sessionLimitCache.UnregisterSession(ctx, account.ID, sessionID); err != nil {
@@ -1606,6 +1641,24 @@ func filterByMinPriority(accounts []accountWithLoad) []accountWithLoad {
 		}
 	}
 	return result
+}
+
+// filterByClaudeRateLimitHealth 优先选择限流快照没有压力信号的账号（见 claudeRateLimitUnderPressure）：
+// 全部都有或都没有压力时保持原集合，只降低有压力账号的权重，不把它们排除。
+func filterByClaudeRateLimitHealth(accounts []accountWithLoad, now time.Time) []accountWithLoad {
+	if len(accounts) <= 1 {
+		return accounts
+	}
+	healthy := make([]accountWithLoad, 0, len(accounts))
+	for _, acc := range accounts {
+		if !claudeRateLimitUnderPressure(acc.account, now) {
+			healthy = append(healthy, acc)
+		}
+	}
+	if len(healthy) == 0 || len(healthy) == len(accounts) {
+		return accounts
+	}
+	return healthy
 }
 
 // filterByMinLoadRate 过滤出负载率最低的账号集合

@@ -3,6 +3,7 @@ package middleware
 import (
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -23,7 +24,7 @@ func Logger() gin.HandlerFunc {
 		c.Next()
 
 		// 跳过健康检查等高频探针路径的日志
-		if path == "/health" || path == "/setup/status" {
+		if path == "/health" || path == "/setup/status" || claude.IsDiscardedTelemetryRequest(c.Request.Method, path) {
 			return
 		}
 

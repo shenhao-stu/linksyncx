@@ -248,7 +248,7 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
 		SettingKeyClaudeCodeClientVersion:                            "",
 		SettingKeyClaudeCodeClientVersionSynced:                      "",
-		SettingKeyClaudeCodeVersionAutoSyncEnabled:                   "true",
+		SettingKeyClaudeCodeVersionAutoSyncEnabled:                   "false",
 		SettingPaymentVisibleMethodAlipaySource:                      "",
 		SettingPaymentVisibleMethodWxpaySource:                       "",
 		SettingPaymentVisibleMethodAlipayEnabled:                     "false",
@@ -268,7 +268,10 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAIAdvancedSchedulerWeightPreviousResponse:      "",
 		SettingKeyOpenAIAdvancedSchedulerWeightSessionSticky:         "",
 
-		SettingKeyAllowUserViewErrorRequests: "false",
+		SettingKeyAllowUserViewErrorRequests:     "false",
+		SettingKeyClaudeDefaultMaxSessions:       strconv.Itoa(DefaultClaudeMaxSessions),
+		SettingKeyClaudeStickyHoldEnabled:        "true",
+		SettingKeyClaudeStickyHoldMaxWaitMinutes: strconv.Itoa(DefaultClaudeStickyHoldMaxWaitMinutes),
 	}
 
 	return s.settingRepo.SetMultiple(ctx, defaults)
@@ -896,12 +899,7 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	}
 	result.ClaudeCodeClientVersion = NormalizeClaudeCodeClientVersion(settings[SettingKeyClaudeCodeClientVersion])
 	result.ClaudeCodeClientVersionSynced = NormalizeClaudeCodeClientVersion(settings[SettingKeyClaudeCodeClientVersionSynced])
-	// 自动同步默认开启：缺失/空值一律视为开启，与 openai_codex_version_auto_sync_enabled 同一惯例。
-	if v, ok := settings[SettingKeyClaudeCodeVersionAutoSyncEnabled]; ok && v != "" {
-		result.ClaudeCodeVersionAutoSyncEnabled = v == "true"
-	} else {
-		result.ClaudeCodeVersionAutoSyncEnabled = true
-	}
+	result.ClaudeCodeVersionAutoSyncEnabled = settings[SettingKeyClaudeCodeVersionAutoSyncEnabled] == "true"
 	// codex_cli_only 加固
 	result.MinCodexVersion = settings[SettingKeyMinCodexVersion]
 	result.MaxCodexVersion = settings[SettingKeyMaxCodexVersion]
@@ -988,6 +986,10 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 			result.AccountSchedulingThresholds = thresholds
 		}
 	}
+	result.ClaudeDefaultMaxSessions = parseClaudeDefaultMaxSessions(settings[SettingKeyClaudeDefaultMaxSessions])
+	stickyHold := parseClaudeStickyHoldSettings(settings[SettingKeyClaudeStickyHoldEnabled], settings[SettingKeyClaudeStickyHoldMaxWaitMinutes])
+	result.ClaudeStickyHoldEnabled = stickyHold.Enabled
+	result.ClaudeStickyHoldMaxWaitMinutes = parseClaudeStickyHoldMaxWaitMinutes(settings[SettingKeyClaudeStickyHoldMaxWaitMinutes])
 
 	result.AllowUserViewErrorRequests = settings[SettingKeyAllowUserViewErrorRequests] == "true" // default false
 

@@ -130,13 +130,20 @@ type SettingService struct {
 	openAICodexUASF             singleflight.Group
 	openAICodexVersionCache     atomic.Value // *cachedOpenAICodexClientVersion
 	openAICodexVersionSF        singleflight.Group
-	claudeCodeVersionCache      atomic.Value // *cachedClaudeCodeClientVersion
-	claudeCodeVersionSF         singleflight.Group
+	clientVersionCache          atomic.Pointer[cachedClientVersions]
+	clientVersionMu             sync.Mutex
 	codexRestrictionPolicyCache atomic.Value // *cachedCodexRestrictionPolicy
 	codexRestrictionPolicySF    singleflight.Group
 
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
 	cyberSessionBlockRuntimeSF    singleflight.Group
+
+	// claudeDefaultMaxSessionsCache 是 Claude 账号默认会话预算的进程内缓存，调度热路径逐账号读取。
+	claudeDefaultMaxSessionsCache atomic.Value // *cachedClaudeDefaultMaxSessions
+	claudeDefaultMaxSessionsSF    singleflight.Group
+	// claudeStickyHoldCache 是「额度未耗尽不换号」设置的进程内缓存，选号时读取。
+	claudeStickyHoldCache atomic.Value // *cachedClaudeStickyHoldSettings
+	claudeStickyHoldSF    singleflight.Group
 
 	// panelRateLimitCache 面板 API 限流配置进程内缓存（*cachedPanelRateLimitSettings）。
 	// 面板每个认证请求都会读取，禁止在热路径上直接访问 DB。

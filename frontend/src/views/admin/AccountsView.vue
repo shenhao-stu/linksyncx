@@ -14,7 +14,7 @@
           <AccountTableActions
             :loading="loading"
             @refresh="handleManualRefresh"
-            @create="openCreateFlow()"
+            @create="openCreateAccount()"
           >
             <template #after>
               <!-- Auto Refresh Dropdown -->
@@ -172,29 +172,6 @@
           >
             {{ t('admin.accounts.listPendingSyncAction') }}
           </button>
-        </div>
-        <div
-          v-if="showUngroupedBanner"
-          class="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-700/40 dark:bg-amber-900/20 dark:text-amber-200"
-          role="status"
-          data-testid="accounts-ungrouped-banner"
-        >
-          <span class="flex min-w-0 items-start gap-2">
-            <Icon name="exclamationTriangle" size="sm" class="mt-0.5 shrink-0" />
-            <span>{{ t('admin.accounts.ungroupedBanner', { count: ungroupedCount }) }}</span>
-          </span>
-          <span class="flex shrink-0 items-center gap-1">
-            <button class="btn btn-secondary px-2 py-1 text-xs" @click="showUngroupedAccounts">
-              {{ t('admin.accounts.ungroupedView') }}
-            </button>
-            <button
-              class="rounded-md p-1 text-amber-700 transition-colors hover:bg-amber-100 dark:text-amber-300 dark:hover:bg-amber-900/40"
-              :aria-label="t('common.close')"
-              @click="ungroupedBannerDismissed = true"
-            >
-              <Icon name="x" size="sm" />
-            </button>
-          </span>
         </div>
       </template>
       <template #table>
@@ -496,6 +473,7 @@
       :z-index="showCreate ? 60 : 50"
       @close="showTargetGroupPicker = false"
       @select="handleTargetGroupSelected"
+      @skip="openCreateAccount()"
       @create-group="handleCreateGroupFromPicker"
     />
     <CreateAccountModal
@@ -506,14 +484,14 @@
       :preset-group="createPresetGroup"
       @close="closeCreateAccount"
       @created="handleAccountCreated"
-      @change-group="openCreateFlow(createPresetGroup?.id ?? null)"
+      @change-group="openTargetGroupPicker(createPresetGroup?.id ?? null)"
     />
     <EditAccountModal :show="showEdit" :account="edAcc" :proxies="proxies" :clash-exits="clashExits" :groups="groups" @close="showEdit = false" @updated="handleAccountEdited" />
     <ReAuthAccountModal :show="showReAuth" :account="reAuthAcc" @close="closeReAuthModal" @reauthorized="handleAccountUpdated" />
     <AccountTestModal :show="showTest" :account="testingAcc" @close="closeTestModal" />
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @reset-client-identity="handleResetClientIdentity" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
     <SyncFromCrsModal :show="showSync" :groups="groups" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" :groups="groups" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -530,6 +508,7 @@
     <TempUnschedStatusModal :show="showTempUnsched" :account="tempUnschedAcc" @close="showTempUnsched = false" @reset="handleTempUnschedReset" />
     <ConfirmDialog :show="showDeleteDialog" :title="t('admin.accounts.deleteAccount')" :message="t('admin.accounts.deleteConfirm', { name: deletingAcc?.name })" :confirm-text="t('common.delete')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmDelete" @cancel="showDeleteDialog = false" />
     <ConfirmDialog :show="showCreateShadowDialog" :title="t('admin.accounts.createSparkShadow')" :message="t('admin.accounts.createSparkShadowConfirm', { name: creatingShadowAcc?.name })" @confirm="confirmCreateSparkShadow" @cancel="showCreateShadowDialog = false" />
+    <ConfirmDialog :show="showResetIdentityDialog" :title="t('admin.accounts.resetClientIdentity')" :message="t('admin.accounts.resetClientIdentityConfirm', { name: resettingIdentityAcc?.name })" :confirm-text="t('admin.accounts.resetClientIdentity')" :cancel-text="t('common.cancel')" :danger="true" @confirm="confirmResetClientIdentity" @cancel="showResetIdentityDialog = false" />
     <ConfirmDialog :show="showExportDataDialog" :title="t('admin.accounts.dataExport')" :message="t('admin.accounts.dataExportConfirmMessage')" :confirm-text="t('admin.accounts.dataExportConfirm')" :cancel-text="t('common.cancel')" @confirm="handleExportData" @cancel="showExportDataDialog = false">
       <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
         <input type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" v-model="includeProxyOnExport" />
@@ -669,8 +648,6 @@ const showCreate = ref(false)
 const showTargetGroupPicker = ref(false)
 const targetGroupPickerInitialId = ref<number | null>(null)
 const createPresetGroup = ref<AdminGroup | null>(null)
-const ungroupedCount = ref(0)
-const ungroupedBannerDismissed = ref(false)
 const showEdit = ref(false)
 const showSync = ref(false)
 const showImportData = ref(false)
@@ -681,6 +658,8 @@ const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
 const showDeleteDialog = ref(false)
 const showCreateShadowDialog = ref(false)
+const showResetIdentityDialog = ref(false)
+const resettingIdentityAcc = ref<Account | null>(null)
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
@@ -1248,7 +1227,6 @@ const load = async (options: AccountLoadOptions = {}) => {
 }
 
 const reload = async () => {
-  void refreshUngroupedCount()
   syncAccountListDerivedParams()
   hasPendingListSync.value = false
   resetAutoRefreshCache()
@@ -1473,6 +1451,9 @@ const shouldReplaceAutoRefreshRow = (current: Account, next: Account) => {
     current.current_concurrency !== next.current_concurrency ||
     current.current_window_cost !== next.current_window_cost ||
     current.active_sessions !== next.active_sessions ||
+    current.session_budget !== next.session_budget ||
+    current.reauth_notice?.days_left !== next.reauth_notice?.days_left ||
+    current.reauth_notice?.expired !== next.reauth_notice?.expired ||
     current.schedulable !== next.schedulable ||
     current.status !== next.status ||
     current.rate_limit_reset_at !== next.rate_limit_reset_at ||
@@ -2214,17 +2195,20 @@ const handleBulkUpdated = () => {
 const handleDataImported = () => { showImportData.value = false; reload() }
 const ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE = 'ungrouped'
 
-// ==================== 先选分组再建号 ====================
-const openCreateFlow = (initialGroupId: number | null = null) => {
-  targetGroupPickerInitialId.value = initialGroupId
-  showTargetGroupPicker.value = true
-}
-const handleTargetGroupSelected = (group: AdminGroup) => {
+// ==================== 建号（分组可选） ====================
+// 分组不是建号前置条件：直接打开表单，分组可在表单内选择或留空。
+// 目标分组只来自路由意图（分组页「添加账号」），表单内可通过选择器更换或取消。
+const openCreateAccount = (group: AdminGroup | null = null) => {
   createPresetGroup.value = group
   showTargetGroupPicker.value = false
   showCreate.value = true
   void loadClashExits()
 }
+const openTargetGroupPicker = (initialGroupId: number | null = null) => {
+  targetGroupPickerInitialId.value = initialGroupId
+  showTargetGroupPicker.value = true
+}
+const handleTargetGroupSelected = (group: AdminGroup) => openCreateAccount(group)
 const closeCreateAccount = () => {
   showCreate.value = false
   createPresetGroup.value = null
@@ -2235,25 +2219,7 @@ const handleCreateGroupFromPicker = (kind: GroupKind) => {
   void router?.push({ path: '/admin/groups', query: { create: '1', kind } })
 }
 
-// ==================== 存量未分组账号提示 ====================
-const showUngroupedBanner = computed(() =>
-  ungroupedCount.value > 0 && !ungroupedBannerDismissed.value && params.group !== ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE
-)
-async function refreshUngroupedCount() {
-  try {
-    ungroupedCount.value = await adminAPI.accounts.countUngrouped()
-  } catch {
-    // 提示条只是引导，统计失败时静默隐藏
-    ungroupedCount.value = 0
-  }
-}
-const showUngroupedAccounts = () => {
-  params.group = ACCOUNT_UNGROUPED_GROUP_QUERY_VALUE
-  pagination.page = 1
-  reload()
-}
-
-// 路由意图：?group=ID|ungrouped 预置分组筛选；?create=1 直接进入建号流程（可配合 group 预选分组）
+// 路由意图：?group=ID|ungrouped 预置分组筛选；?create=1 直接打开建号表单（可配合 group 预选分组）
 const POSITIVE_ID_PATTERN = /^[1-9]\d*$/
 const firstQueryValue = (value: unknown): string => {
   const raw = Array.isArray(value) ? value[0] : value
@@ -2269,8 +2235,7 @@ const consumeCreateIntent = () => {
   if (firstQueryValue(route?.query.create) !== '1') return
   const groupId = POSITIVE_ID_PATTERN.test(routeGroupFilter) ? Number(routeGroupFilter) : null
   const preset = groupId === null ? undefined : groups.value.find(group => group.id === groupId)
-  if (preset) handleTargetGroupSelected(preset)
-  else openCreateFlow(groupId)
+  openCreateAccount(preset ?? null)
   const rest = { ...(route?.query ?? {}) }
   delete rest.create
   void router?.replace({ query: rest })
@@ -2333,7 +2298,8 @@ const mergeRuntimeFields = (oldAccount: Account, updatedAccount: Account): Accou
   ...updatedAccount,
   current_concurrency: updatedAccount.current_concurrency ?? oldAccount.current_concurrency,
   current_window_cost: updatedAccount.current_window_cost ?? oldAccount.current_window_cost,
-  active_sessions: updatedAccount.active_sessions ?? oldAccount.active_sessions
+  active_sessions: updatedAccount.active_sessions ?? oldAccount.active_sessions,
+  session_budget: updatedAccount.session_budget ?? oldAccount.session_budget
 })
 
 const syncPaginationAfterLocalRemoval = () => {
@@ -2604,6 +2570,27 @@ const handleCreateSparkShadow = (a: Account) => {
   creatingShadowAcc.value = a
   showCreateShadowDialog.value = true
 }
+const handleResetClientIdentity = (a: Account) => {
+  resettingIdentityAcc.value = a
+  showResetIdentityDialog.value = true
+}
+const confirmResetClientIdentity = async () => {
+  const a = resettingIdentityAcc.value
+  if (!a) return
+  try {
+    const result = await adminAPI.accounts.resetClientIdentity(a.id)
+    showResetIdentityDialog.value = false
+    resettingIdentityAcc.value = null
+    if (result.reset) {
+      appStore.showSuccess(t('admin.accounts.resetClientIdentitySuccess', { epoch: result.identity_epoch, prefix: result.device_id_prefix ?? '' }))
+    } else {
+      appStore.showSuccess(t('admin.accounts.resetClientIdentityNone'))
+    }
+  } catch (error: any) {
+    console.error('Failed to reset client identity:', error)
+    appStore.showError(extractApiErrorMessage(error, t('admin.accounts.resetClientIdentityFailed')))
+  }
+}
 const confirmCreateSparkShadow = async () => {
   const a = creatingShadowAcc.value
   if (!a) return
@@ -2721,7 +2708,6 @@ onMounted(async () => {
     console.error('Failed to load groups:', groupsResult.reason)
   }
   consumeCreateIntent()
-  void refreshUngroupedCount()
   window.addEventListener('scroll', handleScroll, true)
   window.addEventListener('resize', handleViewportResize)
   document.addEventListener('click', handleClickOutside)

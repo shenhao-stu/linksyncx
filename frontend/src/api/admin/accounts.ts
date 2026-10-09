@@ -85,16 +85,6 @@ export interface AccountUpstreamBillingRatesWithEtagResult {
   data: UpstreamBillingRatesResponse | null
 }
 
-/**
- * 统计尚未归属任何分组的账号数（只取分页总数，不拉明细）。
- */
-export async function countUngrouped(): Promise<number> {
-  const { data } = await apiClient.get<PaginatedResponse<AccountListItem>>('/admin/accounts', {
-    params: { page: 1, page_size: 1, group: 'ungrouped', lite: '1' }
-  })
-  return data.total
-}
-
 export async function getUpstreamBillingRatesWithEtag(
   page: number = 1,
   pageSize: number = 20,
@@ -379,6 +369,27 @@ export async function getStats(id: number, days: number = 30): Promise<AccountUs
  */
 export async function clearError(id: number): Promise<Account> {
   const { data } = await apiClient.post<Account>(`/admin/accounts/${id}/clear-error`)
+  return data
+}
+
+export interface ResetClientIdentityResult {
+  /** false：账号还没有客户端身份，首次使用时会自动生成 */
+  reset: boolean
+  identity_epoch: number
+  /** 新 device_id 的前 8 位，仅供核对 */
+  device_id_prefix?: string
+}
+
+/**
+ * Reset the client identity of a Claude OAuth / setup-token account: the account
+ * becomes a new device (new device ID, identity epoch + 1) and its account-level
+ * sessions are cleared.
+ * @param id - Account ID
+ */
+export async function resetClientIdentity(id: number): Promise<ResetClientIdentityResult> {
+  const { data } = await apiClient.post<ResetClientIdentityResult>(
+    `/admin/accounts/${id}/reset-client-identity`
+  )
   return data
 }
 
@@ -1210,7 +1221,6 @@ export async function refreshOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsag
 
 export const accountsAPI = {
   list,
-  countUngrouped,
   listWithEtag,
   getUpstreamBillingRatesWithEtag,
   getById,
@@ -1227,6 +1237,7 @@ export const accountsAPI = {
   applyOAuthCredentials,
   getStats,
   clearError,
+  resetClientIdentity,
   getUsage,
   getBatchUsage,
   getTodayStats,

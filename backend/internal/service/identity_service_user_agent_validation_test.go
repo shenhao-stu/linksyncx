@@ -47,6 +47,42 @@ func (s *stubIdentityCache) GetOrCreateMaskedSessionID(_ context.Context, _ int6
 	return candidate, nil
 }
 
+func (s *stubIdentityCache) GetOrCreateAmbientSessionID(_ context.Context, _ int64, candidate string) (string, error) {
+	return candidate, nil
+}
+
+func (s *stubIdentityCache) SetLastActiveSessionID(context.Context, int64, string) error { return nil }
+
+func (s *stubIdentityCache) GetLastActiveSessionID(context.Context, int64) (string, error) {
+	return "", nil
+}
+
+func (s *stubIdentityCache) ReplaceFingerprint(_ context.Context, _ int64, fp *Fingerprint) (*Fingerprint, error) {
+	clone := *fp
+	s.fingerprint = &clone
+	return fp, nil
+}
+
+func (s *stubIdentityCache) OverwriteFingerprint(_ context.Context, _ int64, fp *Fingerprint) error {
+	clone := *fp
+	s.fingerprint = &clone
+	return nil
+}
+
+func (s *stubIdentityCache) DeleteAccountSessions(context.Context, int64) error { return nil }
+
+func (s *stubIdentityCache) GetClaudeSessionMigration(context.Context, int64, string, time.Duration) (*ClaudeSessionMigration, error) {
+	return nil, nil
+}
+
+func (s *stubIdentityCache) SetClaudeSessionMigration(context.Context, int64, string, ClaudeSessionMigration, time.Duration) error {
+	return nil
+}
+
+func (s *stubIdentityCache) DeleteClaudeSessionMigration(context.Context, int64, string) error {
+	return nil
+}
+
 func headersWithUA(ua string) http.Header {
 	h := http.Header{}
 	if ua != "" {

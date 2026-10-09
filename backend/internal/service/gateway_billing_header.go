@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // ccVersionInBillingRe matches the semver part of cc_version (X.Y.Z).
@@ -33,14 +32,21 @@ func effectiveBillingUserAgent(mimicUserAgent, tokenType string, mimicClaudeCode
 // Recompute any recognized fingerprint suffix because its input includes the version.
 // Only touches system array blocks whose text starts with "x-anthropic-billing-header".
 func syncBillingHeaderVersion(body []byte, userAgent string) []byte {
+	view := newJSONBodyView(body, nil)
+	syncBillingHeaderVersionView(view, userAgent)
+	return view.data
+}
+
+// syncBillingHeaderVersionView 是 syncBillingHeaderVersion 作用于 jsonBodyView 的版本。
+func syncBillingHeaderVersionView(view *jsonBodyView, userAgent string) {
 	version := ExtractCLIVersion(userAgent)
 	if version == "" {
-		return body
+		return
 	}
 
-	systemResult := gjson.GetBytes(body, "system")
+	systemResult := view.get("system")
 	if !systemResult.Exists() || !systemResult.IsArray() {
-		return body
+		return
 	}
 
 	replacement := "cc_version=" + version
@@ -49,38 +55,15 @@ func syncBillingHeaderVersion(body []byte, userAgent string) []byte {
 		text := item.Get("text")
 		if text.Exists() && text.Type == gjson.String &&
 			strings.HasPrefix(text.String(), "x-anthropic-billing-header") {
-			fingerprintedReplacement := replacement + "." + computeClaudeCodeFingerprint(body, version)
+			fingerprintedReplacement := replacement + "." + computeClaudeCodeFingerprintView(view, version)
 			newText := ccVersionWithFingerprintInBillingRe.ReplaceAllString(text.String(), fingerprintedReplacement)
 			newText = ccVersionInBillingRe.ReplaceAllString(newText, replacement)
-			// 2.1.280 实证：cch 是第一方请求恒带的字面量占位符（无签名）；
-			// 客户端指向 localhost/3P 时会省略，发往第一方前补回；已有值原样保留。
-			if !strings.Contains(newText, "cch=") {
-				newText = ensureBillingCCHStubText(newText)
-			}
+
 			if newText != text.String() {
-				if updated, err := sjson.SetBytes(body, fmt.Sprintf("system.%d.text", idx), newText); err == nil {
-					body = updated
-				}
+				_ = view.setString(fmt.Sprintf("system.%d.text", idx), newText)
 			}
 		}
 		idx++
 		return true
 	})
-
-	return body
-}
-
-// ensureBillingCCHStubText 为 billing attribution 文本补齐 " cch=00000;" 占位符，
-// 插在 cc_entrypoint 子句之后。
-func ensureBillingCCHStubText(text string) string {
-	i := strings.Index(text, "cc_entrypoint=")
-	if i < 0 {
-		return text
-	}
-	j := strings.IndexByte(text[i:], ';')
-	if j < 0 {
-		return text
-	}
-	at := i + j + 1
-	return text[:at] + " cch=00000;" + text[at:]
 }

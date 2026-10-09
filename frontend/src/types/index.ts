@@ -1254,6 +1254,7 @@ export interface ClashRuntimeStatus {
 export interface ClashPoolSettings {
   max_accounts_per_exit: number
   allow_unprobed_exit_binding: boolean
+  automatic_probes_enabled: boolean
   health_test_url: string
   health_timeout_ms: number
   bound_check_interval_seconds: number
@@ -1469,6 +1470,13 @@ export interface OpenCodeGoUsageSettings {
   debounce_minutes: number
 }
 
+/** Claude 登录凭据（refresh token）的重新授权提示 */
+export interface AccountReauthNotice {
+  expires_at: string
+  days_left: number
+  expired: boolean
+}
+
 export interface Account {
   id: number
   name: string
@@ -1603,7 +1611,10 @@ export interface Account {
   // 运行时状态（仅当启用对应限制时返回）
   current_window_cost?: number | null // 当前窗口费用
   active_sessions?: number | null // 当前活跃会话数
+  session_budget?: number | null // 生效的会话预算（账号配置、单会话模式或系统默认值）
   current_rpm?: number | null // 当前分钟 RPM 计数
+  // Claude 登录凭据（refresh token）已过期，或期限固定且不足 3 天时的「需重新授权」提示
+  reauth_notice?: AccountReauthNotice | null
 
   // 影子账号关系（spark 维度影子）
   parent_account_id?: number | null
@@ -1752,7 +1763,7 @@ export interface AccountUsageInfo {
 
 /** Claude 订阅档位（GET /api/oauth/profile 归一化后写入 extra.claude_subscription）。 */
 export interface ClaudeSubscriptionInfo {
-  /** free / pro / max / max_5x / max_20x / team / enterprise，未知组织类型保留原值 */
+  /** free / pro / max / max_5x / max_20x / team / team_standard / team_premium / enterprise，未知组织类型保留原值 */
   plan_type: string
   organization_type?: string
   rate_limit_tier?: string
@@ -2373,6 +2384,17 @@ export interface UserBreakdownItem {
   cost: number
   actual_cost: number
   account_cost: number
+  cache_creation_tokens?: number
+  cache_read_tokens?: number
+}
+
+/** 管理端营收/成本趋势点：account_cost 是上游账号成本，仅管理端接口返回 */
+export interface CostTrendPoint {
+  date: string
+  requests: number
+  cost: number // 标准计费
+  actual_cost: number // 实际扣除（营收）
+  account_cost: number // 账号成本
 }
 
 export interface UserUsageTrendPoint {

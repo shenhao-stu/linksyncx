@@ -18,6 +18,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// computeFinalAnthropicBeta 让本文件的用例继续以 []byte 请求体调用。
+func (s *GatewayService) computeFinalAnthropicBeta(tokenType string, mimicClaudeCode bool, modelID string,
+	clientHeaders http.Header, body []byte, effectiveDropSet map[string]struct{}) (string, bool) {
+	return s.computeFinalAnthropicBetaView(tokenType, mimicClaudeCode, modelID, clientHeaders, newJSONBodyView(body, nil), effectiveDropSet)
+}
+
 // ============================================================================
 // 背景
 // ============================================================================
@@ -314,9 +320,10 @@ func TestComputeFinalAnthropicBeta_APIKeyHaiku_StillUsesAPIKeyBetas(t *testing.T
 	require.True(t, ok)
 	require.Equal(t, claude.APIKeyHaikuBetaHeader, final)
 	require.False(t, anthropicBetaTokensContains(final, claude.BetaOAuth))
-	// 2.1.280 抓包实证：haiku 的 claude-code 在末尾而非缺席。
+	// 2.1.290 抓包实证：haiku 的 claude-code 位于基础位末尾（而非缺席），SDK 能力位殿后。
 	parts := strings.Split(final, ",")
-	require.Equal(t, claude.BetaClaudeCode, parts[len(parts)-1])
+	require.Equal(t, claude.BetaClaudeCode, parts[4])
+	require.Equal(t, claude.BetaCacheDiagnosis, parts[len(parts)-1])
 }
 
 // ============================================================================
@@ -441,7 +448,7 @@ func TestApplyClaudeCodeOAuthMimicryToBody_HaikuRewritesSystem(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","system":"Pi project instructions","messages":[{"role":"user","content":"hello"}]}`)
 	svc := &GatewayService{cfg: &config.Config{}}
 
-	out := svc.applyClaudeCodeOAuthMimicryToBody(
+	out, _ := svc.applyClaudeCodeOAuthMimicryToBody(
 		context.Background(), nil, account, body, "Pi project instructions", "claude-haiku-4-5",
 	)
 
@@ -462,7 +469,7 @@ func TestApplyClaudeCodeOAuthMimicryToBody_FableOmitsRefusedExpansion(t *testing
 	body := []byte(`{"model":"claude-fable-5","system":"Project instructions","messages":[{"role":"user","content":"hello"}]}`)
 	svc := &GatewayService{cfg: &config.Config{}}
 
-	out := svc.applyClaudeCodeOAuthMimicryToBody(
+	out, _ := svc.applyClaudeCodeOAuthMimicryToBody(
 		context.Background(), nil, account, body, "Project instructions", "claude-fable-5",
 	)
 

@@ -689,10 +689,9 @@ const (
 	SettingKeyEnableFingerprintUnification = "enable_fingerprint_unification"
 	// SettingKeyEnableMetadataPassthrough 是否透传客户端原始 metadata.user_id（默认 false）
 	SettingKeyEnableMetadataPassthrough = "enable_metadata_passthrough"
-	// SettingKeyEnableCCHSigning 已废弃（no-op）：2.1.280 实证 cch 为字面量占位符
-	// `cch=00000`（真实 CLI 硬编码、无签名计算），网关在 billing 块中固定注入该
-	// 占位符（见 buildBillingAttributionText），无需开关。保留该 key 仅为向后兼容，
-	// 开关不再产生任何效果。
+	// SettingKeyEnableCCHSigning is retained as a no-op for configuration compatibility.
+	// Native billing attribution is opaque and preserved. The legacy non-native
+	// template uses an unverified placeholder; this switch does not sign requests.
 	SettingKeyEnableCCHSigning = "enable_cch_signing"
 	// SettingKeyEnableClaudeOAuthSystemPromptInjection 是否对 Claude OAuth mimic 路径注入 Claude Code system blocks（默认 true）
 	SettingKeyEnableClaudeOAuthSystemPromptInjection = "enable_claude_oauth_system_prompt_injection"
@@ -731,13 +730,13 @@ const (
 	// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
 	SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
 	// SettingKeyClaudeCodeClientVersion 网关对 Anthropic 上游声明的 Claude Code CLI 客户端版本号（管理员覆写）。
-	// 空值表示跟随自动同步值；自动同步也没有结果时回退到 claude.CLIVersion()（环境变量覆盖 + 内置基线）。
+	// 关闭同步时使用手填值；无有效值时回退到 claude.CLIVersion()。
 	// 版本太旧会被 Anthropic 拒绝（claude_code_version_too_old），故该值需保持跟随官方发布。
 	SettingKeyClaudeCodeClientVersion = "claude_code_client_version"
 	// SettingKeyClaudeCodeClientVersionSynced 自动同步任务写入的官方 Claude Code CLI 最新版本号。
 	// 由同步任务独占写入，面板只读展示；管理员覆写请用 SettingKeyClaudeCodeClientVersion。
 	SettingKeyClaudeCodeClientVersionSynced = "claude_code_client_version_synced"
-	// SettingKeyClaudeCodeVersionAutoSyncEnabled 是否启用 Claude Code 客户端版本号自动同步（默认 true）。
+	// SettingKeyClaudeCodeVersionAutoSyncEnabled 是否启用 Claude Code 客户端版本号自动同步（默认 false）。
 	SettingKeyClaudeCodeVersionAutoSyncEnabled = "claude_code_version_auto_sync_enabled"
 	// SettingKeyOpenAIAllowClaudeCodeCodexPlugin 已废弃：历史全局开关只作为升级迁移输入读取。
 	// 迁移后等价规则写入 SettingKeyCodexCLIOnlyWhitelist，不再参与运行时判定。
@@ -766,6 +765,18 @@ const SettingKeyDefaultPlatformQuotas = "default_platform_quotas"
 // SettingKeyAccountSchedulingThresholds —— 系统全局：按平台自动停调阈值（JSON map）。
 // 值为 map[platform]percent，1..100；100 = 禁用该平台自动停调。
 const SettingKeyAccountSchedulingThresholds = "account_scheduling_thresholds"
+
+// SettingKeyClaudeDefaultMaxSessions —— 系统全局：Anthropic OAuth / setup-token 账号未单独配置
+// max_sessions 时的并发会话预算（整数，0 = 不限，缺省为 DefaultClaudeMaxSessions）。
+const SettingKeyClaudeDefaultMaxSessions = "claude_default_max_sessions"
+
+// SettingKeyClaudeStickyHoldEnabled —— 系统全局：已绑定到 Claude OAuth / setup-token 账号的对话
+// 「额度未耗尽不换号」（缺省开启；关闭即恢复原有换号行为）。
+const SettingKeyClaudeStickyHoldEnabled = "claude_sticky_hold_enabled"
+
+// SettingKeyClaudeStickyHoldMaxWaitMinutes —— 自定义规则触发的临时停调，预计恢复时间不超过该分钟数时
+// 已绑定对话不换号（1–120，缺省 DefaultClaudeStickyHoldMaxWaitMinutes）。
+const SettingKeyClaudeStickyHoldMaxWaitMinutes = "claude_sticky_hold_max_wait_minutes"
 
 // SettingKeyAuthSourcePlatformQuotas 返回某 auth source 的 platform quota JSON key。
 // 形如 auth_source_default_{source}_platform_quotas

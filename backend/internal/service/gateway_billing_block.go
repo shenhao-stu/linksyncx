@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -24,7 +26,12 @@ const fingerprintSalt = "59cf53e54c78"
 // 算法来自 Parrot src/transform/cc_mimicry.py:compute_fingerprint，与官方 CLI 字节对齐。
 // 任何偏差都会导致 cc_version=X.Y.Z.{fp} 在上游侧与真实 CLI 不一致。
 func computeClaudeCodeFingerprint(body []byte, version string) string {
-	firstText := extractFirstUserText(body)
+	return computeClaudeCodeFingerprintView(newJSONBodyView(body, nil), version)
+}
+
+// computeClaudeCodeFingerprintView 是 computeClaudeCodeFingerprint 作用于 jsonBodyView 的版本。
+func computeClaudeCodeFingerprintView(view *jsonBodyView, version string) string {
+	firstText := extractFirstUserTextView(view)
 	indices := []int{4, 7, 20}
 	chars := make([]byte, 0, 3)
 	for _, i := range indices {
@@ -41,7 +48,13 @@ func computeClaudeCodeFingerprint(body []byte, version string) string {
 // extractFirstUserText 提取 messages 中第一条 user 消息的首段 text 内容。
 // 兼容 string 和 []block 两种 content 格式。
 func extractFirstUserText(body []byte) string {
-	messages := gjson.GetBytes(body, "messages")
+	return extractFirstUserTextView(newJSONBodyView(body, nil))
+}
+
+// extractFirstUserTextView 是 extractFirstUserText 作用于 jsonBodyView 的版本。查找结果直接
+// 引用请求体（gjson.GetBytes 会把整个 messages 复制一份），命中的文本在返回前复制。
+func extractFirstUserTextView(view *jsonBodyView) string {
+	messages := view.get("messages")
 	if !messages.IsArray() {
 		return ""
 	}
@@ -67,30 +80,70 @@ func extractFirstUserText(body []byte) string {
 		}
 		return false
 	})
-	return first
+	return strings.Clone(first)
 }
 
 // buildBillingAttributionText 构造 system 数组的 billing attribution 文本。
 //
-// 形态对齐真实 Claude Code CLI 2.1.280：
+// 非 Claude Code 请求使用的旧合成模板：
 //
-//	x-anthropic-billing-header: cc_version=2.1.280.{fp}; cc_entrypoint=cli; cch=00000;
+//	x-anthropic-billing-header: cc_version=2.1.290.{fp}; cc_entrypoint=cli; cch=00000; cc_prompt_id={uuid}; cc_turn_origin=cli; cc_prompt_index={n}; cc_turn_index=1;
 //
-// cch 字段：2.1.280 二进制实证为**硬编码字面量 `00000` 占位符**（构造函数 t0n 中
-// `E = firstParty&&isFirstPartyBaseURL() ? " cch=00000;" : ""`，全二进制无任何签名
-// 计算）。第一方请求恒带该占位符；仅当客户端指向 localhost/第三方 base URL 时才省略。
-// 第三方实现（如 CLIProxyAPI）自行 xxhash 签名是旧版行为，对当前版本反而失真。
-// cc_version + cc_entrypoint 仍是客户端识别与第一方判定依赖的稳定信号。
-//
-// 此 block 不带 cache_control（与真实 CLI 一致；cache breakpoint 由后续的
-// Claude Code prompt block 承担）。
+// The legacy synthesized template retains a cch placeholder. Its wire value is
+// not verified for current clients; existing client billing blocks are preserved.
 func buildBillingAttributionText(body []byte, cliVersion string) (string, error) {
 	if cliVersion == "" {
 		return "", fmt.Errorf("cliVersion required")
 	}
-	fp := computeClaudeCodeFingerprint(body, cliVersion)
+	view := newJSONBodyView(body, nil)
+	fp := computeClaudeCodeFingerprintView(view, cliVersion)
 	return fmt.Sprintf(
-		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=00000;",
-		cliVersion, fp,
+		"x-anthropic-billing-header: cc_version=%s.%s; cc_entrypoint=cli; cch=00000; cc_prompt_id=%s; cc_turn_origin=cli; cc_prompt_index=%d; cc_turn_index=1;",
+		cliVersion, fp, uuid.NewString(), countUserPromptIndex(view),
 	), nil
+}
+
+// countUserPromptIndex 近似 cc_prompt_index：非 tool_result 的 user 消息数 - 1。
+func countUserPromptIndex(view *jsonBodyView) int {
+	messages := view.get("messages")
+	if !messages.IsArray() {
+		return 0
+	}
+	count := 0
+	messages.ForEach(func(_, msg gjson.Result) bool {
+		if msg.Get("role").String() != "user" {
+			return true
+		}
+		content := msg.Get("content")
+		// 纯文本 user 消息计入；块形态时首块为 tool_result 的是工具回传，不计入
+		if content.Type == gjson.String {
+			count++
+			return true
+		}
+		if content.IsArray() {
+			if first := content.Get("0.type").String(); first != "" && first != "tool_result" {
+				count++
+			}
+		}
+		return true
+	})
+	if count == 0 {
+		return 0
+	}
+	return count - 1
+}
+
+// extractBillingPromptIDView 从最终请求体的 billing 块中提取 cc_prompt_id 值。
+func extractBillingPromptIDView(view *jsonBodyView) string {
+	text := view.get("system.0.text").String()
+	const marker = "cc_prompt_id="
+	i := strings.Index(text, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := text[i+len(marker):]
+	if j := strings.IndexByte(rest, ';'); j >= 0 {
+		return strings.TrimSpace(rest[:j])
+	}
+	return ""
 }

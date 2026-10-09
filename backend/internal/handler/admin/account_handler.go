@@ -67,6 +67,8 @@ type AccountHandler struct {
 	ollamaCloudUsage        *service.OllamaCloudUsageService
 	cfg                     *config.Config
 	opencodeGoUsage         *service.OpenCodeGoUsageService
+	identityService         *service.IdentityService
+	settingService          *service.SettingService
 }
 
 // SetUpstreamBillingProbeService attaches the optional remote billing probe service.
@@ -80,6 +82,21 @@ func (h *AccountHandler) SetOllamaCloudUsageService(usage *service.OllamaCloudUs
 
 func (h *AccountHandler) SetOpenCodeGoUsageService(usage *service.OpenCodeGoUsageService) {
 	h.opencodeGoUsage = usage
+}
+
+// SetIdentityService attaches the client identity service used by ResetClientIdentity.
+func (h *AccountHandler) SetIdentityService(identity *service.IdentityService) {
+	h.identityService = identity
+}
+
+// SetSettingService 注入系统设置，用于计算 Claude 账号的默认会话预算。
+func (h *AccountHandler) SetSettingService(settingService *service.SettingService) {
+	h.settingService = settingService
+}
+
+// claudeSessionBudget 返回账号生效的会话预算（0 = 不限），见 service.ClaudeSessionBudget。
+func (h *AccountHandler) claudeSessionBudget(ctx context.Context, account *service.Account) int {
+	return service.ClaudeSessionBudget(account, h.settingService.GetClaudeDefaultMaxSessions(ctx))
 }
 
 // NewAccountHandler creates a new admin account handler
@@ -204,7 +221,10 @@ type AccountWithConcurrency struct {
 	// 以下字段仅对 Anthropic OAuth/SetupToken 账号有效，且仅在启用相应功能时返回
 	CurrentWindowCost *float64 `json:"current_window_cost,omitempty"` // 当前窗口费用
 	ActiveSessions    *int     `json:"active_sessions,omitempty"`     // 当前活跃会话数
+	SessionBudget     *int     `json:"session_budget,omitempty"`      // 生效的会话预算（账号配置、单会话模式或系统默认值）
 	CurrentRPM        *int     `json:"current_rpm,omitempty"`         // 当前分钟 RPM 计数
+	// ReauthNotice refresh token 已过期或期限固定且不足 3 天时的「需重新授权」提示
+	ReauthNotice *service.ClaudeReauthNotice `json:"reauth_notice,omitempty"`
 }
 
 // AccountListItemWithConcurrency is the compact account-list envelope used
@@ -217,7 +237,9 @@ type AccountListItemWithConcurrency struct {
 	SchedulerScores    []AccountSchedulerGroupScore `json:"scheduler_scores,omitempty"`
 	CurrentWindowCost  *float64                     `json:"current_window_cost,omitempty"`
 	ActiveSessions     *int                         `json:"active_sessions,omitempty"`
+	SessionBudget      *int                         `json:"session_budget,omitempty"`
 	CurrentRPM         *int                         `json:"current_rpm,omitempty"`
+	ReauthNotice       *service.ClaudeReauthNotice  `json:"reauth_notice,omitempty"`
 }
 
 type simpleModeGroupReference struct {
@@ -380,6 +402,7 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 	}
 
 	if account.IsAnthropicOAuthOrSetupToken() {
+		item.ReauthNotice = service.ClaudeReauthNoticeFor(account, time.Now())
 		if h.accountUsageService != nil && account.GetWindowCostLimit() > 0 {
 			startTime := account.GetCurrentWindowStartTime()
 			if stats, err := h.accountUsageService.GetAccountWindowStats(ctx, account.ID, startTime); err == nil && stats != nil {
@@ -388,12 +411,15 @@ func (h *AccountHandler) buildAccountResponseWithRuntime(ctx context.Context, ac
 			}
 		}
 
-		if h.sessionLimitCache != nil && account.GetMaxSessions() > 0 {
-			idleTimeout := time.Duration(account.GetSessionIdleTimeoutMinutes()) * time.Minute
-			idleTimeouts := map[int64]time.Duration{account.ID: idleTimeout}
-			if sessions, err := h.sessionLimitCache.GetActiveSessionCountBatch(ctx, []int64{account.ID}, idleTimeouts); err == nil {
-				if count, ok := sessions[account.ID]; ok {
-					item.ActiveSessions = &count
+		if budget := h.claudeSessionBudget(ctx, account); budget > 0 {
+			item.SessionBudget = &budget
+			if h.sessionLimitCache != nil {
+				idleTimeout := time.Duration(account.GetSessionIdleTimeoutMinutes()) * time.Minute
+				idleTimeouts := map[int64]time.Duration{account.ID: idleTimeout}
+				if sessions, err := h.sessionLimitCache.GetActiveSessionCountBatch(ctx, []int64{account.ID}, idleTimeouts); err == nil {
+					if count, ok := sessions[account.ID]; ok {
+						item.ActiveSessions = &count
+					}
 				}
 			}
 		}
@@ -735,13 +761,16 @@ func (h *AccountHandler) List(c *gin.Context) {
 	sessionLimitAccountIDs := make([]int64, 0)
 	rpmAccountIDs := make([]int64, 0)
 	sessionIdleTimeouts := make(map[int64]time.Duration) // 各账号的会话空闲超时配置
+	sessionBudgets := make(map[int64]int)                // 各账号生效的会话预算
+	defaultSessionBudget := h.settingService.GetClaudeDefaultMaxSessions(c.Request.Context())
 	for i := range accounts {
 		acc := &accounts[i]
 		if acc.IsAnthropicOAuthOrSetupToken() {
 			if acc.GetWindowCostLimit() > 0 {
 				windowCostAccountIDs = append(windowCostAccountIDs, acc.ID)
 			}
-			if acc.GetMaxSessions() > 0 {
+			if budget := service.ClaudeSessionBudget(acc, defaultSessionBudget); budget > 0 {
+				sessionBudgets[acc.ID] = budget
 				sessionLimitAccountIDs = append(sessionLimitAccountIDs, acc.ID)
 				sessionIdleTimeouts[acc.ID] = time.Duration(acc.GetSessionIdleTimeoutMinutes()) * time.Minute
 			}
@@ -797,6 +826,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 
 	// Build response with concurrency info
 	result := make([]AccountWithConcurrency, len(accounts))
+	now := time.Now()
 	for i := range accounts {
 		acc := &accounts[i]
 		accountResponse := h.accountResponseFromService(acc)
@@ -812,6 +842,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 			CurrentConcurrency: concurrencyCounts[acc.ID],
 			SchedulerScore:     schedulerScores[acc.ID],
 			SchedulerScores:    schedulerGroupScores[acc.ID],
+			ReauthNotice:       service.ClaudeReauthNoticeFor(acc, now),
 		}
 
 		// 添加窗口费用（仅当启用时）
@@ -821,7 +852,10 @@ func (h *AccountHandler) List(c *gin.Context) {
 			}
 		}
 
-		// 添加活跃会话数（仅当启用时）
+		// 添加会话预算与活跃会话数（仅当启用时）
+		if budget, ok := sessionBudgets[acc.ID]; ok {
+			item.SessionBudget = &budget
+		}
 		if activeSessions != nil {
 			if count, ok := activeSessions[acc.ID]; ok {
 				item.ActiveSessions = &count
@@ -851,7 +885,9 @@ func (h *AccountHandler) List(c *gin.Context) {
 				SchedulerScores:    item.SchedulerScores,
 				CurrentWindowCost:  item.CurrentWindowCost,
 				ActiveSessions:     item.ActiveSessions,
+				SessionBudget:      item.SessionBudget,
 				CurrentRPM:         item.CurrentRPM,
+				ReauthNotice:       item.ReauthNotice,
 			}
 		}
 		etag := buildAccountsListETag(compact, total, page, pageSize, platform, accountType, status, search, true)
@@ -1276,7 +1312,7 @@ type SyncFromCRSRequest struct {
 	Password           string   `json:"password" binding:"required"`
 	SyncProxies        *bool    `json:"sync_proxies"`
 	SelectedAccountIDs []string `json:"selected_account_ids"`
-	// GroupIDs 新建账号的目标分组：每个账号只绑定与其平台相同的目标分组，无匹配分组的新账号不会被创建。
+	// GroupIDs 新建账号的目标分组（可选）：每个账号只绑定与其平台相同的目标分组，无匹配分组的新账号创建为未分组账号。
 	GroupIDs []int64 `json:"group_ids"`
 }
 
@@ -1505,7 +1541,12 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		// Use Anthropic/Claude OAuth service to refresh token
 		tokenInfo, err := h.oauthService.RefreshAccountToken(ctx, account)
 		if err != nil {
-			return nil, "", err
+			if infraerrors.FromError(err).Reason != infraerrors.UnknownReason {
+				return nil, "", err
+			}
+			// 刷新链路返回普通 error（后台刷新按子串分类），这里转成可读的接口错误，
+			// 否则管理端只能看到 "internal error"。
+			return nil, "", infraerrors.Newf(http.StatusBadGateway, "CLAUDE_OAUTH_REFRESH_FAILED", "%v", err).WithCause(err)
 		}
 
 		// Copy existing credentials to preserve non-token settings (e.g., intercept_warmup_requests)
@@ -1524,6 +1565,9 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 		}
 		if strings.TrimSpace(tokenInfo.Scope) != "" {
 			newCredentials["scope"] = tokenInfo.Scope
+		}
+		if tokenInfo.RefreshTokenExpiresAt > 0 {
+			newCredentials["refresh_token_expires_at"] = strconv.FormatInt(tokenInfo.RefreshTokenExpiresAt, 10)
 		}
 	}
 
@@ -1735,6 +1779,53 @@ func (h *AccountHandler) GetStats(c *gin.Context) {
 	}
 
 	response.Success(c, stats)
+}
+
+// ResetClientIdentityResponse 是重置客户端身份的结果。Reset 为 false 表示账号还没有身份，
+// 下次请求会直接新建。DeviceIDPrefix 只给出新 device_id 的前 8 位，供管理员核对。
+type ResetClientIdentityResponse struct {
+	Reset          bool   `json:"reset"`
+	IdentityEpoch  int64  `json:"identity_epoch"`
+	DeviceIDPrefix string `json:"device_id_prefix,omitempty"`
+}
+
+// ResetClientIdentity 把 Claude OAuth / setup-token 账号换成一台新「设备」：
+// identity_epoch + 1、新 device_id、默认 UA 与头，旧身份下的账号级会话一并清除。
+// POST /api/v1/admin/accounts/:id/reset-client-identity
+func (h *AccountHandler) ResetClientIdentity(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		response.BadRequest(c, "Invalid account ID")
+		return
+	}
+	if h.identityService == nil {
+		response.ErrorFrom(c, infraerrors.New(http.StatusServiceUnavailable, "CLIENT_IDENTITY_UNAVAILABLE", "client identity service is not configured"))
+		return
+	}
+	account, err := h.adminService.GetAccount(c.Request.Context(), accountID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if !account.IsAnthropicOAuthOrSetupToken() {
+		response.ErrorFrom(c, infraerrors.New(http.StatusBadRequest, "CLIENT_IDENTITY_UNSUPPORTED", "client identity reset only applies to Claude OAuth and setup-token accounts"))
+		return
+	}
+
+	fp, err := h.identityService.ResetClientIdentity(c.Request.Context(), account)
+	if err != nil {
+		response.ErrorFrom(c, infraerrors.Newf(http.StatusServiceUnavailable, "CLIENT_IDENTITY_RESET_FAILED", "failed to reset client identity: %v", err).WithCause(err))
+		return
+	}
+	if fp == nil {
+		response.Success(c, ResetClientIdentityResponse{Reset: false})
+		return
+	}
+	prefix := fp.ClientID
+	if len(prefix) > 8 {
+		prefix = prefix[:8]
+	}
+	response.Success(c, ResetClientIdentityResponse{Reset: true, IdentityEpoch: fp.IdentityEpoch, DeviceIDPrefix: prefix})
 }
 
 // ClearError handles clearing account error
@@ -2091,12 +2182,8 @@ func (h *AccountHandler) BatchCreate(c *gin.Context) {
 			return
 		}
 	}
-	// 逐账号校验分组：账号必须归属分组，且管理分组独占规则按账号计算，不能合并后统一校验。
+	// 逐账号校验分组：分组可选，但管理分组独占规则按账号计算，不能合并后统一校验。
 	for _, item := range req.Accounts {
-		if len(item.GroupIDs) == 0 {
-			response.ErrorFrom(c, service.ErrAccountGroupRequired)
-			return
-		}
 		if err := h.adminService.ValidateAccountGroupBindings(c.Request.Context(), item.GroupIDs); err != nil {
 			response.ErrorFrom(c, err)
 			return

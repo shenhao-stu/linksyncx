@@ -10,7 +10,6 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
@@ -168,6 +167,10 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	// 构建上游请求
 	upstreamReq, wireBody, err := s.buildCountTokensRequest(ctx, c, account, body, token, tokenType, reqModel, shouldMimicClaudeCode)
 	if err != nil {
+		if errors.Is(err, ErrClientIdentityUnavailable) {
+			s.countTokensError(c, http.StatusServiceUnavailable, "overloaded_error", "Upstream account temporarily unavailable")
+			return err
+		}
 		s.countTokensError(c, http.StatusInternalServerError, "api_error", "Failed to build request")
 		return err
 	}
@@ -520,16 +523,21 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		ctEnableFP, ctEnableMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
 	}
 	var ctFingerprint *Fingerprint
-	if account.IsOAuth() && s.identityService != nil {
-		fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, clientHeaders)
-		if err == nil {
-			ctFingerprint = fp
-			if !ctEnableMPT {
-				accountUUID := account.GetExtraString("account_uuid")
-				if accountUUID != "" && fp.ClientID != "" {
-					if newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp.ClientID, fp.UserAgent); err == nil && len(newBody) > 0 {
-						body = newBody
-					}
+	if account.IsOAuth() && s.identityService != nil && (ctEnableFP || !ctEnableMPT || mimicClaudeCode) {
+		fp, err := s.identityService.GetOrCreateAccountFingerprint(ctx, account, clientHeaders)
+		if err != nil {
+			return nil, nil, fmt.Errorf("account identity unavailable: %w", err)
+		}
+		ctFingerprint = fp
+		if !ctEnableMPT {
+			accountUUID := account.GetExtraString("account_uuid")
+			if accountUUID != "" && fp.ClientID != "" {
+				newBody, err := s.identityService.RewriteUserIDWithMasking(ctx, body, account, accountUUID, fp)
+				if err != nil {
+					return nil, nil, err
+				}
+				if len(newBody) > 0 {
+					body = newBody
 				}
 			}
 		}
@@ -543,11 +551,11 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 	// 一致性铁律：同一次请求内只取一次 mimic UA，billing cc_version 与出站
 	// User-Agent 头共用这一个字符串（同 buildUpstreamRequest）。
 	ctMimicUserAgent := claude.DefaultUserAgent()
-	if billingUA := effectiveBillingUserAgent(ctMimicUserAgent, tokenType, mimicClaudeCode, billingFingerprint); billingUA != "" {
+	if billingUA := effectiveBillingUserAgent(ctMimicUserAgent, tokenType, mimicClaudeCode, billingFingerprint); mimicClaudeCode && billingUA != "" {
 		body = syncBillingHeaderVersion(body, billingUA)
 	}
 
-	// === 计算最终 anthropic-beta header（先于 body sanitize 与 CCH 签名）===
+	// === 计算最终 anthropic-beta header（先于 body sanitize）===
 	// 顺序约束同 buildUpstreamRequest。
 	ctEffectiveDropSet := mergeDropSets(s.getBetaPolicyFilterSet(ctx, c, account, modelID))
 	finalBetaHeader, finalBetaShouldSet := s.computeFinalCountTokensAnthropicBeta(
@@ -642,13 +650,21 @@ func (s *GatewayService) buildCountTokensRequest(ctx context.Context, c *gin.Con
 		setHeaderRaw(req.Header, "anthropic-beta", finalBetaHeader)
 	}
 
-	// 同步 X-Claude-Code-Session-Id（真实 CLI 恒带，即使 count_tokens body 无 metadata）
+	// 同步 X-Claude-Code-Session-Id（真实 CLI 恒带，即使 count_tokens body 无 metadata）。
+	// 真实 CLI 的 count_tokens body 不带 metadata：用客户端会话头映射成本账号的会话，
+	// 与该对话 messages 请求一致；都没有时复用账号最近活跃会话或环境会话。
 	if tokenType == "oauth" {
-		switch {
-		case ctSessionID != "":
-			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", ctSessionID)
-		case mimicClaudeCode && getHeaderRaw(req.Header, "X-Claude-Code-Session-Id") == "":
-			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", uuid.NewString())
+		var identityEpoch int64
+		if ctFingerprint != nil {
+			identityEpoch = ctFingerprint.IdentityEpoch
+		}
+		sessionID, err := s.claudeUpstreamSessionID(ctx, account, identityEpoch, clientHeaders, ctSessionID, !ctEnableFP && ctEnableMPT && !mimicClaudeCode)
+		if err != nil {
+			return nil, nil, err
+		}
+		if sessionID != "" {
+			deleteHeaderAllForms(req.Header, "X-Claude-Code-Session-Id")
+			setHeaderRaw(req.Header, "X-Claude-Code-Session-Id", sessionID)
 		}
 	}
 

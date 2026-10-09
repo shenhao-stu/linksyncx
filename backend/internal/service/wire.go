@@ -29,9 +29,8 @@ func ProvideGrokOAuthService(proxyRepo ProxyRepository, oauthClient GrokOAuthCli
 
 // BuildInfo contains build information
 type BuildInfo struct {
-	Version         string
-	UpstreamVersion string
-	BuildType       string
+	Version   string
+	BuildType string
 }
 
 // ProvidePricingService creates and initializes PricingService
@@ -46,7 +45,7 @@ func ProvidePricingService(cfg *config.Config, remoteClient PricingRemoteClient)
 
 // ProvideUpdateService creates UpdateService with BuildInfo
 func ProvideUpdateService(cache UpdateCache, githubClient GitHubReleaseClient, buildInfo BuildInfo) *UpdateService {
-	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.UpstreamVersion, buildInfo.BuildType)
+	return NewUpdateService(cache, githubClient, buildInfo.Version, buildInfo.BuildType)
 }
 
 // ProvideEmailQueueService creates EmailQueueService with default worker count
@@ -235,6 +234,7 @@ func ProvideAccountUsageService(
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
 	openAIGatewayService *OpenAIGatewayService,
+	claudeTokenProvider *ClaudeTokenProvider,
 ) *AccountUsageService {
 	service := NewAccountUsageService(
 		accountRepo,
@@ -250,6 +250,7 @@ func ProvideAccountUsageService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	service.SetClaudeTokenProvider(claudeTokenProvider)
 	return service
 }
 
@@ -417,14 +418,12 @@ func ProvideOpenAICodexVersionSyncService(
 	return svc
 }
 
-// ProvideClaudeCodeVersionSyncService creates and starts ClaudeCodeVersionSyncService.
-// 出站 Claude Code 身份的版本号靠它跟随官方发布，无需为了跟版本而发新版本；面板可关闭。
-func ProvideClaudeCodeVersionSyncService(
-	settingRepo SettingRepository,
+// ProvideClientVersionSyncService creates and starts ClientVersionSyncService.
+// All clients require an explicit opt-in before any metadata request.
+func ProvideClientVersionSyncService(
 	settingService *SettingService,
-	githubClient GitHubReleaseClient,
-) *ClaudeCodeVersionSyncService {
-	svc := NewClaudeCodeVersionSyncService(settingRepo, settingService, githubClient, claudeCodeVersionSyncInterval)
+) *ClientVersionSyncService {
+	svc := NewClientVersionSyncService(settingService, clientVersionSyncInterval)
 	svc.Start()
 	return svc
 }
@@ -510,8 +509,10 @@ func ProvideRateLimitService(
 	settingService *SettingService,
 	tokenCacheInvalidator TokenCacheInvalidator,
 	ollamaCloudUsage *OllamaCloudUsageService,
+	claudeRateLimitCache ClaudeRateLimitCache,
 ) *RateLimitService {
 	svc := NewRateLimitService(accountRepo, usageRepo, cfg, geminiQuotaService, tempUnschedCache)
+	svc.SetClaudeRateLimitCache(claudeRateLimitCache)
 	if healthCache, ok := tempUnschedCache.(OpenAIAPIKeyHealthCache); ok {
 		svc.SetOpenAIAPIKeyHealthCache(healthCache)
 	}
@@ -812,11 +813,13 @@ func ProvideSettingService(settingRepo SettingRepository, groupRepo GroupReposit
 	SetCodexCanonicalUserAgentResolver(func() string {
 		return svc.GetOpenAICodexCanonicalUserAgent(context.Background())
 	})
-	// Claude CLI 伪装版本号同理：运行期解析（面板手动值 → 后台同步值 → 内置基线），
+	// Claude CLI、SDK 和 Grok CLI 共享版本策略与缓存；关闭同步时使用手填值。
 	// 解析器内部自带 60s TTL 缓存，热路径不触库。
 	claude.SetCLIVersionResolver(func() string {
 		return svc.GetClaudeCodeClientVersion(context.Background())
 	})
+	claude.SetSDKVersionResolver(func() string { return svc.clientVersion(context.Background(), "claude_sdk") })
+	xai.SetCLIVersionResolver(func() string { return svc.clientVersion(context.Background(), "grok_cli") })
 	return svc
 }
 
@@ -941,14 +944,14 @@ var ProviderSet = wire.NewSet(
 	ProvideUserMessageQueueService,
 	NewUsageRecordWorkerPool,
 	ProvideSchedulerSnapshotService,
-	NewIdentityService,
+	ProvideIdentityService,
 	NewCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,
 	ProvideOpenAICodexVersionSyncService,
-	ProvideClaudeCodeVersionSyncService,
+	ProvideClientVersionSyncService,
 	ProvideProxyExpiryService,
 	ProvideSubscriptionExpiryService,
 	ProvideTimingWheelService,

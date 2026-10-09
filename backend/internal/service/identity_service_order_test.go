@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -26,6 +27,29 @@ func (s *identityCacheStub) GetOrCreateMaskedSessionID(_ context.Context, _ int6
 		s.maskedSessionID = candidate
 	}
 	return s.maskedSessionID, nil
+}
+func (s *identityCacheStub) GetOrCreateAmbientSessionID(_ context.Context, _ int64, candidate string) (string, error) {
+	return candidate, nil
+}
+func (s *identityCacheStub) SetLastActiveSessionID(context.Context, int64, string) error { return nil }
+func (s *identityCacheStub) GetLastActiveSessionID(context.Context, int64) (string, error) {
+	return "", nil
+}
+func (s *identityCacheStub) ReplaceFingerprint(_ context.Context, _ int64, fp *Fingerprint) (*Fingerprint, error) {
+	return fp, nil
+}
+func (s *identityCacheStub) OverwriteFingerprint(context.Context, int64, *Fingerprint) error {
+	return nil
+}
+func (s *identityCacheStub) DeleteAccountSessions(context.Context, int64) error { return nil }
+func (s *identityCacheStub) GetClaudeSessionMigration(context.Context, int64, string, time.Duration) (*ClaudeSessionMigration, error) {
+	return nil, nil
+}
+func (s *identityCacheStub) SetClaudeSessionMigration(context.Context, int64, string, ClaudeSessionMigration, time.Duration) error {
+	return nil
+}
+func (s *identityCacheStub) DeleteClaudeSessionMigration(context.Context, int64, string) error {
+	return nil
 }
 
 func TestIdentityService_RewriteUserID_PreservesTopLevelFieldOrder(t *testing.T) {
@@ -70,7 +94,7 @@ func TestIdentityService_RewriteUserIDWithMasking_PreservesTopLevelFieldOrder(t 
 		},
 	}
 
-	result, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc-uuid", "client-xyz", "claude-cli/2.1.78 (external, cli)")
+	result, err := svc.RewriteUserIDWithMasking(context.Background(), body, account, "acc-uuid", &Fingerprint{ClientID: "client-xyz", UserAgent: "claude-cli/2.1.78 (external, cli)"})
 	require.NoError(t, err)
 	resultStr := string(result)
 

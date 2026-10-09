@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/gin-gonic/gin"
 )
 
@@ -18,12 +19,12 @@ func RegisterCommonRoutes(r *gin.Engine) {
 	// 默认 false 即带认证上报）；旧路径仅为向后兼容保留。
 	// 不上游转发：多账号 relay 场景下把终端用户的设备遥测绑定到任一上游账号
 	// 都是隐私与关联性风险；且遥测缺失本身是合法客户端配置（DISABLE_TELEMETRY）。
-	r.POST("/api/event_logging/batch", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
-	r.POST("/api/event_logging/v2/batch", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
+	for _, path := range []string{claude.EventLoggingPath, claude.EventLoggingV2Path} {
+		r.POST(path, func(c *gin.Context) {
+			c.Header("Cache-Control", "no-store")
+			c.Status(http.StatusOK)
+		})
+	}
 
 	// Setup status endpoint (always returns needs_setup: false in normal mode)
 	// This is used by the frontend to detect when the service has restarted after setup

@@ -40,48 +40,11 @@ var headerWireCasing = map[string]string{
 	// （2.1.81 旧抓包为小写，以新抓包为准），故不在表中，按 Canonical 直写。
 
 	// Claude Code 2.1.87+ 新增 header
-	"x-claude-code-session-id": "X-Claude-Code-Session-Id",
-	"x-client-request-id":      "x-client-request-id",
-	"content-length":           "content-length",
-}
-
-// headerWireOrder 定义真实 Claude CLI 发送 header 的顺序（本机 claude.exe
-// 2.1.280 抓包：Bun fetch 的用户头按头名字节序升序，随后 Connection/Host/
-// Accept-Encoding/Content-Length 固定尾序）。线上顺序由传输层 httpwire 按同一
-// 规则写出（TLS 指纹链路），这里只用于 debug log 按此顺序输出，便于与抓包对比。
-var headerWireOrder = []string{
-	"Accept",
-	"Authorization",
-	"Content-Type",
-	"User-Agent",
-	"X-Claude-Code-Session-Id",
-	"X-Stainless-Arch",
-	"X-Stainless-Lang",
-	"X-Stainless-OS",
-	"X-Stainless-Package-Version",
-	"X-Stainless-Retry-Count",
-	"X-Stainless-Runtime",
-	"X-Stainless-Runtime-Version",
-	"X-Stainless-Timeout",
-	"anthropic-beta",
-	"anthropic-dangerous-direct-browser-access",
-	"anthropic-version",
-	"x-app",
-	"x-client-request-id",
-	"x-stainless-helper-method",
-	"accept-language",
-	"sec-fetch-mode",
-	"Accept-Encoding",
-}
-
-// headerWireOrderSet 用于快速判断某个 key 是否在 headerWireOrder 中（按 lowercase 匹配）。
-var headerWireOrderSet map[string]struct{}
-
-func init() {
-	headerWireOrderSet = make(map[string]struct{}, len(headerWireOrder))
-	for _, k := range headerWireOrder {
-		headerWireOrderSet[strings.ToLower(k)] = struct{}{}
-	}
+	"x-claude-code-session-id":    "X-Claude-Code-Session-Id",
+	"x-claude-code-prompt-id":     "x-claude-code-prompt-id",
+	"x-claude-code-request-class": "x-claude-code-request-class",
+	"x-client-request-id":         "x-client-request-id",
+	"content-length":              "content-length",
 }
 
 // resolveWireCasing 将 Go canonical key（如 X-Stainless-Os）映射为真实 wire casing（如 X-Stainless-OS）。
@@ -144,39 +107,4 @@ func getHeaderRaw(h http.Header, key string) string {
 	}
 	// 3. canonical fallback
 	return h.Get(key)
-}
-
-// sortHeadersByWireOrder 按照真实 Claude CLI 的 header 顺序返回排序后的 key 列表。
-// 在 headerWireOrder 中定义的 key 按其顺序排列，未定义的 key 追加到末尾。
-func sortHeadersByWireOrder(h http.Header) []string {
-	// 构建 lowercase -> actual map key 的映射
-	present := make(map[string]string, len(h))
-	for k := range h {
-		present[strings.ToLower(k)] = k
-	}
-
-	result := make([]string, 0, len(h))
-	seen := make(map[string]struct{}, len(h))
-
-	// 先按 wire order 输出
-	for _, wk := range headerWireOrder {
-		lk := strings.ToLower(wk)
-		if actual, ok := present[lk]; ok {
-			if _, dup := seen[lk]; !dup {
-				result = append(result, actual)
-				seen[lk] = struct{}{}
-			}
-		}
-	}
-
-	// 再追加不在 wire order 中的 header
-	for k := range h {
-		lk := strings.ToLower(k)
-		if _, ok := seen[lk]; !ok {
-			result = append(result, k)
-			seen[lk] = struct{}{}
-		}
-	}
-
-	return result
 }

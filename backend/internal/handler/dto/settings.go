@@ -350,6 +350,13 @@ type SystemSettings struct {
 	// 系统全局账号自动停调阈值（key = platform，100 = disabled）
 	AccountSchedulingThresholds map[string]int `json:"account_scheduling_thresholds,omitempty"`
 
+	// Claude OAuth / setup-token 账号未单独配置 max_sessions 时的会话预算（0 = 不限）
+	ClaudeDefaultMaxSessions int `json:"claude_default_max_sessions"`
+
+	// 已绑定 Claude 对话「额度未耗尽不换号」与自定义规则短时停调的不换号阈值（分钟）
+	ClaudeStickyHoldEnabled        bool `json:"claude_sticky_hold_enabled"`
+	ClaudeStickyHoldMaxWaitMinutes int  `json:"claude_sticky_hold_max_wait_minutes"`
+
 	// 允许终端用户在用量页查看自己的失败请求
 	AllowUserViewErrorRequests bool `json:"allow_user_view_error_requests"`
 }

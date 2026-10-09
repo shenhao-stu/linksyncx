@@ -203,3 +203,15 @@ func TestUpdateSettingsSubscriptionEnabledIsWritableAndKeptWhenOmitted(t *testin
 	require.Equal(t, "false", repo.values[service.SettingKeySubscriptionEnabled],
 		"a payload without subscription_enabled must not flip the stored value back to true")
 }
+
+func TestUpdateSettingsKeepsSeparatelyManagedClientVersionKeys(t *testing.T) {
+	h, repo := newStepUpSwitchTestHandler(t, map[string]string{
+		service.SettingKeyClaudeCodeClientVersion:          "9.0.0",
+		service.SettingKeyClaudeCodeVersionAutoSyncEnabled: "true",
+	})
+	rec := doUpdateSettings(t, h, map[string]any{"site_name": "Example"}, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, repo.lastUpdates, service.SettingKeyClaudeCodeClientVersion)
+	require.NotContains(t, repo.lastUpdates, service.SettingKeyClaudeCodeVersionAutoSyncEnabled)
+	require.Equal(t, "9.0.0", repo.values[service.SettingKeyClaudeCodeClientVersion])
+}

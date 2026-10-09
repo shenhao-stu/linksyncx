@@ -4,16 +4,17 @@ export default {
       description: 'Manage AI platform accounts and credentials',
       targetGroup: {
         title: 'Choose a target group',
-        description: 'Every account must belong to a group. Pick the group first, then fill in the account details.',
+        description: 'Pick the group to add the account to (the group sets the platform). Groups are optional: you can skip this and assign one later.',
         channelTab: 'Channel groups',
         managedTab: 'Managed groups',
         search: 'Search groups',
         emptyChannel: 'No channel groups yet',
         emptyManaged: 'No managed groups yet',
-        emptyHint: 'Create a group first, then come back to add accounts.',
+        emptyHint: 'Create a group, or add the account without one.',
         noMatch: 'No matching groups',
         createGroup: 'New group',
         next: 'Next',
+        skip: 'No group',
         accountsCount: '{count} accounts',
         inactive: 'Inactive',
         selected: 'Target group',
@@ -21,19 +22,14 @@ export default {
         platformLocked: 'The platform is set by the target group "{name}"',
         managedLocked: 'Accounts in a managed group belong to that group only',
       },
-      groupRequired: 'Select at least one group',
       managedGroupExclusive: 'An account in a managed group cannot belong to any other group',
       managedGroupHint: 'If you pick a managed group, it must be the only group',
-      ungroupedBanner: '{count} accounts do not belong to any group yet. Accounts now need a group, so assign one soon.',
-      ungroupedView: 'View them',
       importTargetGroups: 'Target groups',
-      importTargetGroupsHint: 'Each account is bound only to the target groups on its platform; accounts whose platform has no selected group are not imported.',
-      importTargetGroupsRequired: 'Choose target groups for the import',
-      importTargetGroupsMissing: 'No target group selected for: {platforms}',
+      importTargetGroupsHint: 'Optional. Each account is bound only to the target groups on its platform; accounts whose platform has no selected group are imported without a group.',
       targetPlatformCovered: 'group selected',
-      targetPlatformMissing: 'no group',
+      targetPlatformMissing: 'ungrouped',
       crsTargetGroups: 'Target groups for new accounts',
-      crsTargetGroupsHint: 'New accounts are bound only to the target groups on their platform; existing accounts are updated without changing their groups.',
+      crsTargetGroupsHint: 'Optional. New accounts are bound only to the target groups on their platform and stay ungrouped when none matches; existing accounts are updated without changing their groups.',
       createAccount: 'Create Account',
       autoRefresh: 'Auto Refresh',
       enableAutoRefresh: 'Enable auto refresh',
@@ -275,6 +271,10 @@ export default {
         creditsExhausted: 'Credits Exhausted',
         creditsExhaustedUntil: 'AI Credits exhausted, expected recovery at {time}',
         overloadedUntil: 'Overloaded until {time}',
+        reauthRequired: 'Re-auth required',
+        reauthInDays: 'Re-auth in {days}d',
+        reauthInDaysTooltip: 'The sign-in credential (refresh token) expires at {time} and cannot be renewed automatically. Re-authorize before then or the account will stop working',
+        reauthExpiredTooltip: 'The sign-in credential (refresh token) expired at {time}. Re-authorize the account to use it again',
         clashExitUnavailable: 'Exit unavailable',
         viewTempUnschedDetails: 'View temp unschedulable details',
         tempUnschedulableUntil: 'Resumes {time}'
@@ -414,8 +414,10 @@ export default {
           normal: '5h window cost normal'
         },
         sessions: {
-          full: 'Active sessions full, new sessions must wait (idle timeout: {idle} min)',
-          normal: 'Active sessions normal (idle timeout: {idle} min)'
+          full: 'Session budget full: new conversations go to other accounts, bound conversations continue (idle timeout: {idle} min)',
+          normal: 'Active sessions normal (idle timeout: {idle} min)',
+          singleSession: 'Single-session mode, one conversation at a time',
+          systemDefault: 'Using the system default session limit'
         },
         rpm: {
           full: 'RPM limit reached',
@@ -594,6 +596,11 @@ export default {
       createSparkShadowConfirm: 'Create a spark shadow account linked to "{name}"? It shares the parent\'s credentials and serves only spark models.',
       createSparkShadowSuccess: 'Spark shadow account created',
       createSparkShadowFailed: 'Failed to create spark shadow account',
+      resetClientIdentity: 'Reset Client Identity',
+      resetClientIdentityConfirm: 'Reset the client identity of "{name}"? The account becomes a new device (new device ID and identity epoch), and ongoing conversations will look like new sessions upstream. Use only if you suspect the current identity has been flagged.',
+      resetClientIdentitySuccess: 'Client identity reset (epoch {epoch}, device ID {prefix}…)',
+      resetClientIdentityNone: 'This account has no client identity yet; one is created on first use',
+      resetClientIdentityFailed: 'Failed to reset client identity',
       duplicateAccount: 'Duplicate Account',
       duplicateSuccess: 'Account duplicated as "{name}" and paused. Review its credentials before enabling it.',
       duplicateFailed: 'Failed to duplicate account',
@@ -789,8 +796,8 @@ export default {
         searchTestHint:
           'Standalone web_search probe (same as gateway /v1/web_search). Not a free-form chat with tools.',
         ttsTextLabel: 'TTS text',
-        ttsTextPlaceholder: 'Example: Hello from Sub2API connectivity test.',
-        ttsTextDefault: 'Hello from Sub2API account connectivity test.',
+        ttsTextPlaceholder: 'Example: Hello, this is a quick audio test.',
+        ttsTextDefault: 'Hello, this is a quick audio test.',
         ttsTestHint: 'Standalone /v1/tts with language=en; success reports audio byte size.',
         sttTestHint: 'Standalone /v1/stt with a synthetic silent WAV; success means the endpoint is reachable.',
         realtimeTestHint:
@@ -987,7 +994,7 @@ export default {
         },
         sessionLimit: {
           label: 'Session Count Limit',
-          hint: 'Limit the number of active concurrent sessions',
+          hint: 'Set a limit on concurrently active sessions for this account. When off, the system default session limit applies; single-session mode fixes it to 1',
           maxSessions: 'Max Sessions',
           maxSessionsPlaceholder: '3',
           maxSessionsHint: 'Maximum number of active concurrent sessions',
@@ -1023,8 +1030,8 @@ export default {
           randomProfile: 'Random'
         },
         sessionIdMasking: {
-          label: 'Session ID Masking',
-          hint: 'When enabled, fixes the session ID in metadata.user_id for 15 minutes, making upstream think requests come from the same session'
+          label: 'Single-Session Mode',
+          hint: 'Conversations on this account share one session ID (15-minute sliding window) and the session limit becomes 1: one conversation at a time, other new conversations go to other accounts. Pair it with the serialize queue'
         },
         cacheTTLOverride: {
           label: 'Cache TTL Override',
@@ -1733,6 +1740,19 @@ export default {
         weeklyTitle: 'A weekly 5-hour session reset (a limited rollout for some Max accounts); usable only once the 5-hour limit is used up',
         ineligible: 'Not eligible for resets',
         ineligibleTitle: 'Upstream reason: {reason}',
+        ineligibleReasons: {
+          config_off: 'not enabled upstream',
+          tier: 'plan not supported',
+          seat: 'team seat not supported',
+          mobile: 'mobile subscription not supported',
+          surface: 'client type not accepted',
+          cli_version: 'Claude Code version too old',
+          no_grant: 'no reset granted to this account',
+          tenure: 'subscription too new',
+          other_experiment: 'enrolled in another experiment',
+          unavailable: 'upstream could not decide right now',
+          unknown: 'unknown reason'
+        },
         limits: {
           five_hour: '5-hour',
           seven_day: 'weekly',

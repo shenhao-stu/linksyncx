@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/anthropicfp"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
@@ -395,7 +396,8 @@ func (s *GatewayService) buildOAuthMetadataUserID(parsed *ParsedRequest, account
 //   - systemRaw：body 中原始 system 字段（用于判断是否需要 rewrite）。
 //   - model：最终会发给上游的模型 ID（用于模型规范化 + metadata 版本选择）。
 //
-// 返回：改写后的 body。即使中间任何一步失败，也会退化成原 body（不会 panic）。
+// 返回：改写后的 body。中间步骤失败时退化成原 body（不会 panic）；唯一的错误是账号
+// 客户端身份不可用（ErrClientIdentityUnavailable），此时返回可换号的错误，不带残缺的伪装出站。
 func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	ctx context.Context,
 	c *gin.Context,
@@ -403,9 +405,9 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	body []byte,
 	systemRaw any,
 	model string,
-) []byte {
+) ([]byte, error) {
 	if account == nil || !account.IsOAuth() || len(body) == 0 {
-		return body
+		return body, nil
 	}
 
 	systemPromptInjectionEnabled, systemPrompt, systemPromptBlocks := s.claudeOAuthSystemPromptInjectionSettings(ctx)
@@ -417,7 +419,11 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 	normalizeOpts := claudeOAuthNormalizeOptions{}
 
 	if s.identityService != nil && c != nil && c.Request != nil {
-		if fp, err := s.identityService.GetOrCreateFingerprint(ctx, account.ID, c.Request.Header); err == nil && fp != nil {
+		fp, err := s.identityService.GetOrCreateAccountFingerprint(ctx, account, c.Request.Header)
+		if err != nil {
+			return nil, claudeIdentityUnavailableFailover(account, err)
+		}
+		if fp != nil {
 			mimicMPT := false
 			if s.settingService != nil {
 				_, mimicMPT, _ = s.settingService.GetGatewayForwardingSettings(ctx)
@@ -449,7 +455,7 @@ func (s *GatewayService) applyClaudeCodeOAuthMimicryToBody(
 		body = applyToolsLastCacheBreakpoint(body)
 	}
 
-	return body
+	return body, nil
 }
 
 // buildOAuthMetadataUserIDFromBody 是 buildOAuthMetadataUserID 的变体，
@@ -1016,13 +1022,34 @@ func rewriteSystemForNonClaudeCodeWithPromptBlocks(body []byte, system any, expa
 	return out
 }
 
+var (
+	cacheControlKeyPattern = newAnchoredPatterns('_', []byte("cache_control"))
+	// lowercaseLetterEscapePatterns 是把 a-z、"_" 写成 JSON 转义时的前缀（码点 0x5F-0x7A）。
+	lowercaseLetterEscapePatterns = newAnchoredPatterns('\\', []byte(`\u005`), []byte(`\u006`), []byte(`\u007`))
+)
+
+// jsonMayContainCacheControlKey 报告合法 JSON 片段中是否可能有名为 cache_control 的键：键名的
+// 每个字符要么原样出现，要么写成 \u005X-\u007X 转义（十六进制大小写均可）。返回 false 时
+// gjson 必然查不到这个键。
+func jsonMayContainCacheControlKey(raw string) bool {
+	b := unsafe.Slice(unsafe.StringData(raw), len(raw))
+	return cacheControlKeyPattern.containedIn(b) || lowercaseLetterEscapePatterns.containedIn(b)
+}
+
 type cacheControlPath struct {
 	path string
 	log  string
 }
 
 func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, messagePaths []string, toolPaths []string, systemPaths []string) {
-	system := gjson.GetBytes(body, "system")
+	return collectCacheControlPathsView(newJSONBodyView(body, nil))
+}
+
+// collectCacheControlPathsView 是 collectCacheControlPaths 作用于 jsonBodyView 的版本。查到的值
+// 只在本函数内使用，直接引用请求体（gjson.GetBytes 会把命中的值整段复制一份，messages 往往
+// 占请求体绝大部分）。
+func collectCacheControlPathsView(view *jsonBodyView) (invalidThinking []cacheControlPath, messagePaths []string, toolPaths []string, systemPaths []string) {
+	system := view.get("system")
 	if system.IsArray() {
 		sysIndex := 0
 		system.ForEach(func(_, item gjson.Result) bool {
@@ -1042,10 +1069,17 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 		})
 	}
 
-	messages := gjson.GetBytes(body, "messages")
+	messages := view.get("messages")
 	if messages.IsArray() {
+		// 请求体已校验合法时（持有索引），消息原文里没有出现过 cache_control 键的可能，就跳过
+		// 逐块查找：长对话里只有最后几条消息带断点。
+		skipImpossible := view.idx != nil
 		msgIndex := 0
 		messages.ForEach(func(_, msg gjson.Result) bool {
+			if skipImpossible && !jsonMayContainCacheControlKey(msg.Raw) {
+				msgIndex++
+				return true
+			}
 			content := msg.Get("content")
 			if content.IsArray() {
 				contentIndex := 0
@@ -1070,7 +1104,7 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 		})
 	}
 
-	tools := gjson.GetBytes(body, "tools")
+	tools := view.get("tools")
 	if tools.IsArray() {
 		toolIndex := 0
 		tools.ForEach(func(_, tool gjson.Result) bool {
@@ -1088,11 +1122,17 @@ func collectCacheControlPaths(body []byte) (invalidThinking []cacheControlPath, 
 // enforceCacheControlLimit 强制执行 cache_control 块数量限制（最多 4 个）
 // 超限时优先移除工具断点，再移除 messages 断点，最后才移除 system 断点。
 func enforceCacheControlLimit(body []byte) []byte {
+	return enforceCacheControlLimitIndexed(body, nil)
+}
+
+// enforceCacheControlLimitIndexed 与 enforceCacheControlLimit 相同；idx 恰好描述 body 时
+// 收集断点改走顶层索引。
+func enforceCacheControlLimitIndexed(body []byte, idx *jsonBodyIndex) []byte {
 	if len(body) == 0 {
 		return body
 	}
 
-	invalidThinking, messagePaths, toolPaths, systemPaths := collectCacheControlPaths(body)
+	invalidThinking, messagePaths, toolPaths, systemPaths := collectCacheControlPathsView(newJSONBodyView(body, idx))
 	out := body
 	modified := false
 
@@ -1338,8 +1378,8 @@ func (s *GatewayService) claudeOAuthSystemPromptInjectionSettings(ctx context.Co
 // 用于识别被上游 API 网关代理的真实 Claude Code 流量：此类请求的 User-Agent 被网关替换
 // 为 Go-http-client，但 body 保留了完整的客户端特征。如果不识别这类请求而走 mimicry
 // 重写 system，会破坏 Anthropic prompt cache 的前缀一致性，导致 messages 级缓存永不命中。
-func systemHasBillingAttributionBlock(body []byte) bool {
-	system := gjson.GetBytes(body, "system")
+func systemHasBillingAttributionBlock(view *jsonBodyView) bool {
+	system := view.get("system")
 	if !system.IsArray() {
 		return false
 	}

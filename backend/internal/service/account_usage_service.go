@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -117,13 +118,14 @@ const (
 
 // UsageCache 封装账户使用量相关的缓存
 type UsageCache struct {
-	apiCache          sync.Map           // accountID -> *apiUsageCache
-	windowStatsCache  sync.Map           // accountID -> *windowStatsCache
-	antigravityCache  sync.Map           // accountID -> *antigravityUsageCache
-	apiFlight         singleflight.Group // 防止同一账号的并发请求击穿缓存（Anthropic）
-	antigravityFlight singleflight.Group // 防止同一 Antigravity 账号的并发请求击穿缓存
-	openAIProbeCache  sync.Map           // accountID -> time.Time
-	grokProbeCache    sync.Map           // accountID -> last billing probe attempt
+	apiCache           sync.Map           // accountID -> *apiUsageCache
+	windowStatsCache   sync.Map           // accountID -> *windowStatsCache（5h 窗口）
+	sevenDayStatsCache sync.Map           // accountID -> *windowStatsCache（7d 窗口）
+	antigravityCache   sync.Map           // accountID -> *antigravityUsageCache
+	apiFlight          singleflight.Group // 防止同一账号的并发请求击穿缓存（Anthropic）
+	antigravityFlight  singleflight.Group // 防止同一 Antigravity 账号的并发请求击穿缓存
+	openAIProbeCache   sync.Map           // accountID -> time.Time
+	grokProbeCache     sync.Map           // accountID -> last billing probe attempt
 }
 
 // NewUsageCache 创建 UsageCache 实例
@@ -313,6 +315,16 @@ type AccountUsageService struct {
 	agentIdentityWS         agentIdentityWSConnectionInvalidator
 	// claudeSubscription 在读取 Claude OAuth 用量时按需后台补全订阅档位（可为 nil）。
 	claudeSubscription claudeSubscriptionRefresher
+	// claudeTokenProvider 主动用量查询取 access token（临近过期先刷新，可为 nil）。
+	// 后台刷新只覆盖活跃账号（D7），闲置账号库里的 token 可能已过期。
+	claudeTokenProvider claudeAccessTokenProvider
+}
+
+// SetClaudeTokenProvider 挂载 Claude OAuth 的 token provider，主动用量查询经它取 token。
+func (s *AccountUsageService) SetClaudeTokenProvider(provider *ClaudeTokenProvider) {
+	if provider != nil {
+		s.claudeTokenProvider = provider
+	}
 }
 
 // claudeSubscriptionRefresher 在后台为缺少或过期的 Claude OAuth 账号补全订阅档位，不阻塞调用方。
@@ -1402,50 +1414,42 @@ func enrichUsageWithAccountError(info *UsageInfo, account *Account) {
 // addWindowStats 为 usage 数据添加窗口期统计
 // 使用独立缓存（1 分钟），与 API 缓存分离
 func (s *AccountUsageService) addWindowStats(ctx context.Context, account *Account, usage *UsageInfo) {
-	// 修复：即使 FiveHour 为 nil，也要尝试获取统计数据
-	// 因为 SevenDay/SevenDaySonnet/SevenDayFable 可能需要
-	if usage.FiveHour == nil && usage.SevenDay == nil && usage.SevenDaySonnet == nil && usage.SevenDayFable == nil {
-		return
-	}
-
-	// 检查窗口统计缓存（1 分钟）
-	var windowStats *WindowStats
-	if cached, ok := s.cache.windowStatsCache.Load(account.ID); ok {
-		if cache, ok := cached.(*windowStatsCache); ok && time.Since(cache.timestamp) < windowStatsCacheTTL {
-			windowStats = cache.stats
-		}
-	}
-
-	// 如果没有缓存，从数据库查询
-	if windowStats == nil {
-		// 使用统一的窗口开始时间计算逻辑（考虑窗口过期情况）
-		startTime := account.GetCurrentWindowStartTime()
-
-		stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, account.ID, startTime)
-		if err != nil {
-			log.Printf("Failed to get window stats for account %d: %v", account.ID, err)
-			return
-		}
-
-		windowStats = &WindowStats{
-			Requests:     stats.Requests,
-			Tokens:       stats.Tokens,
-			Cost:         stats.Cost,
-			StandardCost: stats.StandardCost,
-			UserCost:     stats.UserCost,
-		}
-
-		// 缓存窗口统计（1 分钟）
-		s.cache.windowStatsCache.Store(account.ID, &windowStatsCache{
-			stats:     windowStats,
-			timestamp: time.Now(),
-		})
-	}
-
-	// 为 FiveHour 添加 WindowStats（5h 窗口统计）
 	if usage.FiveHour != nil {
-		usage.FiveHour.WindowStats = windowStats
+		// 使用统一的窗口开始时间计算逻辑（考虑窗口过期情况）
+		if stats := s.cachedWindowStats(ctx, &s.cache.windowStatsCache, account.ID, account.GetCurrentWindowStartTime()); stats != nil {
+			usage.FiveHour.WindowStats = stats
+		}
 	}
+
+	// 7d 窗口统计：前端据此按 7d 使用率估算满额总费用（与 OpenAI 7d 窗口一致）
+	if usage.SevenDay != nil {
+		start := codexWindowStatsStart(usage.SevenDay, 7*24*time.Hour, time.Now())
+		if stats := s.cachedWindowStats(ctx, &s.cache.sevenDayStatsCache, account.ID, start); stats != nil {
+			usage.SevenDay.WindowStats = stats
+		}
+	}
+}
+
+// cachedWindowStats 查询账号自 startTime 起的本地窗口统计，按账号缓存 1 分钟；查询失败返回 nil。
+func (s *AccountUsageService) cachedWindowStats(ctx context.Context, cache *sync.Map, accountID int64, startTime time.Time) *WindowStats {
+	if cached, ok := cache.Load(accountID); ok {
+		if entry, ok := cached.(*windowStatsCache); ok && time.Since(entry.timestamp) < windowStatsCacheTTL {
+			return entry.stats
+		}
+	}
+
+	stats, err := s.usageLogRepo.GetAccountWindowStats(ctx, accountID, startTime)
+	if err != nil {
+		log.Printf("Failed to get window stats for account %d: %v", accountID, err)
+		return nil
+	}
+
+	windowStats := windowStatsFromAccountStats(stats)
+	cache.Store(accountID, &windowStatsCache{
+		stats:     windowStats,
+		timestamp: time.Now(),
+	})
+	return windowStats
 }
 
 // GetTodayStats 获取账号今日统计
@@ -1619,7 +1623,7 @@ func (s *AccountUsageService) GetAccountUsageStats(ctx context.Context, accountI
 // 如果账号开启了 TLS 指纹，则使用 TLS 指纹伪装
 // 如果有缓存的 Fingerprint，则使用缓存的 User-Agent 等信息
 func (s *AccountUsageService) fetchOAuthUsageRaw(ctx context.Context, account *Account) (*ClaudeUsageResponse, error) {
-	accessToken := account.GetCredential("access_token")
+	accessToken := s.claudeUsageAccessToken(ctx, account)
 	if accessToken == "" {
 		return nil, fmt.Errorf("no access token available")
 	}
@@ -1629,6 +1633,21 @@ func (s *AccountUsageService) fetchOAuthUsageRaw(ctx context.Context, account *A
 		return nil, err
 	}
 	return s.usageFetcher.FetchUsageWithOptions(ctx, opts)
+}
+
+// claudeUsageAccessToken 取主动用量查询用的 access token：Claude OAuth 账号先经 token provider
+// （过期或临近过期时按需刷新，与真实 CLI 用到才刷新一致），失败时回退到凭据里的 token。
+func (s *AccountUsageService) claudeUsageAccessToken(ctx context.Context, account *Account) string {
+	if s.claudeTokenProvider != nil && account.Platform == PlatformAnthropic && account.Type == AccountTypeOAuth {
+		token, err := s.claudeTokenProvider.GetAccessToken(ctx, account)
+		if err == nil && strings.TrimSpace(token) != "" {
+			return token
+		}
+		if err != nil {
+			slog.Warn("claude_usage_access_token_failed", "account_id", account.ID, "error_code", infraerrors.Reason(err))
+		}
+	}
+	return account.GetCredential("access_token")
 }
 
 // claudeFetchOptions 构建调用 Claude OAuth 账号侧接口的公共选项：代理、TLS 指纹与缓存的
